@@ -1,76 +1,8 @@
-# Intelligence Programming Language — Complete Reference Manual
+# Intelligence Language & Tool Manual
 
-This manual provides a full breakdown of the Intelligence programming language, its file structure, core rules, built-in tools, and terminal shortcuts.
+## Core Commands
 
----
-
-## 1. Core Philosophy
-
-Intelligence is designed around a simple idea: **Software is a set of pathways carrying data between processing stations.**
-
-Instead of telling the computer step-by-step how to manipulate memory, you draw a map of how information flows:
-* **Pathways** carry specific types of data.
-* **Stations** transform data from one pathway into another.
-* **Connections** link stations together sequentially or in parallel.
-
----
-
-## 2. Language Keywords & Syntax
-
-### Pathways (`type`)
-Defines a specific kind of data moving through your program.
-
-### Stations (`morphism`)
-Processes incoming data from one pathway and produces data for an outgoing pathway.
-
-### Pipelines (`pipeline`)
-Connects stations into a complete program flow.
-
----
-
-## 3. The Core Connection Rules
-
-Intelligence uses four primary operators to control how pathways and stations interact:
-
-* **Sequential Flow (`>>`):** Connects stations end-to-end. Output from the left station enters the right station.
-* **Parallel Flow (`||`):** Runs two pathways or stations side-by-side simultaneously without interference.
-* **Matrix Binding (`*`):** Merges two pathways into a combined state grid for advanced data storage.
-* **Reset / Unbind (`~`):** Cleans up linked states and frees system resources when work is complete.
-
----
-
-## 4. Project File Structure
-
-The repository is organized into three clean core directories:
-
-* **`src/` (The Compiler):** The immutable core engine written in Rust. It checks your pathways for errors and converts your `.i` blueprints into fast C code.
-* **`std/` (Standard Library):** Reusable Intelligence files containing basic building blocks and mathematical transformations.
-* **`extensions/` (System Driver Substrates):** Low-level C files (`editor_nano.c` and `persistence_disk.c`) that handle terminal keypresses, screen updates, and disk storage.
-
----
-
-## 5. Built-in Tool: The `note` Editor & Shortcuts
-
-Intelligence includes a globally available terminal note-taking editor (`note`) built entirely using these concepts.
-
-* **Binary Location:** `$PREFIX/bin/note`
-* **Storage File:** `~/.ilang_repository.txt`
-
-### Termux Commands
-* **`note`**: Launches the global Intelligence text/note editor from anywhere in the terminal.
-* **`notes`**: Directly views and prints all saved note logs from your repository file.
-
-### In-Editor Keyboard Shortcuts
-* **`Ctrl + S`**: Save current note with an automatic timestamp and active tag.
-* **`Ctrl + R`**: Open and read previously saved notes inside the editor.
-* **`Ctrl + T`**: Switch or create a new organizational tag/category.
-* **`Ctrl + X`**: Exit the editor and return to terminal prompt.
-
----
-
-## 6. How Intelligence Executes Code
-
-1. You write a program blueprint in an **`.i`** file.
-2. The Intelligence compiler reads the file and validates every connection.
-3. Intelligence generates clean C code (**`payload.c`**).
-4. Your system compiler (`gcc` or `clang`) turns the C code into a tiny, standalone program that runs anywhere without extra requirements.
+- `intelligence <file.i>`: Compiles and executes Intelligence blueprint files.
+- `note "your note text" -t "#tag"`: Saves a timestamped note with a custom tag.
+- `notes`: Displays all repository notes saved in `~/.ilang_repository.txt`.
+- `notes "#tag"`: Strictly filters notes by tag or keyword (wrap tags in quotes to prevent shell comment interpretation).
