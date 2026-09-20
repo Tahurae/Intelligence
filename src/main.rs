@@ -34,23 +34,13 @@ impl PrimitiveRegistry {
             primitives: HashMap::new(),
         };
 
-        registry.register(
-            "add",
-            Space::Base("Int".into()),
-            Space::Base("Int".into()),
-            "result = a + b;".into(),
-        );
-        registry.register(
-            "mul",
-            Space::Base("Int".into()),
-            Space::Base("Int".into()),
-            "result = a * b;".into(),
-        );
+        registry.register("add", Space::Base("Int".into()), Space::Base("Int".into()), "long long result = a + b;".into());
+        registry.register("mul", Space::Base("Int".into()), Space::Base("Int".into()), "long long result = a * b;".into());
         registry
     }
 
-    pub fn register(&mut self, name: &str, dom: Space, cod: Space, impl_: String) {
-        self.primitives.insert(name.to_string(), (dom, cod, impl_));
+    pub fn register(&mut self, name: &str, dom: Space, cod: Space, implementation: String) {
+        self.primitives.insert(name.to_string(), (dom, cod, implementation));
     }
 
     pub fn get(&self, name: &str) -> Option<(Space, Space, String)> {
@@ -79,67 +69,36 @@ struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
-    }
+    fn new(input: &'a str) -> Self { Self { input, pos: 0 } }
 
     fn next_token(&mut self) -> Option<Token> {
         self.skip_whitespace();
-        if self.pos >= self.input.len() {
-            return None;
-        }
+        if self.pos >= self.input.len() { return None; }
 
         let rest = &self.input[self.pos..];
         if rest.starts_with("//") {
             if let Some(idx) = rest.find('\n') {
                 self.pos += idx + 1;
                 return self.next_token();
-            } else {
-                self.pos = self.input.len();
-                return None;
             }
+            self.pos = self.input.len();
+            return None;
         }
-
-        if rest.starts_with(">>") {
-            self.pos += 2;
-            return Some(Token::OpChain);
-        }
-        if rest.starts_with("||") {
-            self.pos += 2;
-            return Some(Token::OpParallel);
-        }
-        if rest.starts_with("->") {
-            self.pos += 2;
-            return Some(Token::Arrow);
-        }
+        if rest.starts_with(">>") { self.pos += 2; return Some(Token::OpChain); }
+        if rest.starts_with("||") { self.pos += 2; return Some(Token::OpParallel); }
+        if rest.starts_with("->") { self.pos += 2; return Some(Token::Arrow); }
 
         let ch = rest.chars().next().unwrap();
         match ch {
-            '=' => {
-                self.pos += 1;
-                Some(Token::Equals)
-            }
-            ':' => {
-                self.pos += 1;
-                Some(Token::Colon)
-            }
-            '~' => {
-                self.pos += 1;
-                Some(Token::OpDagger)
-            }
-            '(' => {
-                self.pos += 1;
-                Some(Token::LParen)
-            }
-            ')' => {
-                self.pos += 1;
-                Some(Token::RParen)
-            }
+            '=' => { self.pos += 1; Some(Token::Equals) }
+            ':' => { self.pos += 1; Some(Token::Colon) }
+            '~' => { self.pos += 1; Some(Token::OpDagger) }
+            '(' => { self.pos += 1; Some(Token::LParen) }
+            ')' => { self.pos += 1; Some(Token::RParen) }
             _ if ch.is_alphanumeric() || ch == '_' => {
-                let len = rest
-                    .chars()
+                let len = rest.chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .map(|c| c.len_utf8())
+                    .map(char::len_utf8)
                     .sum();
                 let ident = &rest[..len];
                 self.pos += len;
@@ -149,21 +108,14 @@ impl<'a> Lexer<'a> {
                     _ => Some(Token::Ident(ident.to_string())),
                 }
             }
-            _ => {
-                self.pos += ch.len_utf8();
-                self.next_token()
-            }
+            _ => { self.pos += ch.len_utf8(); self.next_token() }
         }
     }
 
     fn skip_whitespace(&mut self) {
         while self.pos < self.input.len() {
             let ch = self.input[self.pos..].chars().next().unwrap();
-            if ch.is_whitespace() {
-                self.pos += ch.len_utf8();
-            } else {
-                break;
-            }
+            if ch.is_whitespace() { self.pos += ch.len_utf8(); } else { break; }
         }
     }
 }
@@ -178,60 +130,43 @@ impl Parser {
     pub fn new(input: &str) -> Self {
         let mut lexer = Lexer::new(input);
         let mut tokens = Vec::new();
-        while let Some(tok) = lexer.next_token() {
-            tokens.push(tok);
-        }
-
-        Self {
-            tokens,
-            pos: 0,
-            primitive_types: HashMap::new(),
-        }
+        while let Some(token) = lexer.next_token() { tokens.push(token); }
+        Self { tokens, pos: 0, primitive_types: HashMap::new() }
     }
 
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
-    }
+    fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
 
     fn advance(&mut self) -> Option<Token> {
         if self.pos < self.tokens.len() {
-            let t = self.tokens[self.pos].clone();
+            let token = self.tokens[self.pos].clone();
             self.pos += 1;
-            Some(t)
-        } else {
-            None
-        }
+            Some(token)
+        } else { None }
     }
 
     fn expect(&mut self, expected: Token) -> Result<(), String> {
         match self.advance() {
-            Some(tok) if tok == expected => Ok(()),
+            Some(token) if token == expected => Ok(()),
             _ => Err("Syntax error".to_string()),
         }
     }
 
     pub fn parse(&mut self, registry: &mut PrimitiveRegistry) -> Result<Flow, String> {
         let mut main_flow = None;
-
         while self.pos < self.tokens.len() {
             match self.peek() {
                 Some(Token::KwSpace) => self.parse_space_decl()?,
                 Some(Token::KwFlow) => main_flow = Some(self.parse_flow_decl(registry)?),
                 Some(Token::Ident(_)) => self.parse_primitive_decl(registry)?,
-                _ => {
-                    self.advance();
-                }
+                _ => { self.advance(); }
             }
         }
-
         main_flow.ok_or_else(|| "No flow found".to_string())
     }
 
     fn parse_space_decl(&mut self) -> Result<(), String> {
         self.expect(Token::KwSpace)?;
-        if matches!(self.peek(), Some(Token::Ident(_))) {
-            self.advance();
-        }
+        if matches!(self.peek(), Some(Token::Ident(_))) { self.advance(); }
         self.expect(Token::Equals)?;
         self.parse_space_expr()?;
         Ok(())
@@ -242,18 +177,14 @@ impl Parser {
             Some(Token::Ident(name)) => name,
             _ => return Err("Expected primitive name".to_string()),
         };
-
         self.expect(Token::Colon)?;
         let domain = self.parse_space_expr()?;
         self.expect(Token::Arrow)?;
         let codomain = self.parse_space_expr()?;
-
         let c_impl = Self::get_default_impl(&name)
             .unwrap_or_else(|| format!("/* {} not implemented */", name));
-
-        registry.register(&name, domain.clone(), codomain.clone(), c_impl.clone());
-        self.primitive_types.insert(name.clone(), (domain.clone(), codomain.clone()));
-
+        registry.register(&name, domain.clone(), codomain.clone(), c_impl);
+        self.primitive_types.insert(name, (domain, codomain));
         Ok(())
     }
 
@@ -267,7 +198,9 @@ impl Parser {
     }
 
     fn parse_space_expr(&mut self) -> Result<Space, String> {
-        let mut left = match self.peek() {
+        // Clone the token before mutating self. Matching directly on self.peek()
+        // keeps an immutable borrow alive across self.advance().
+        let mut left = match self.peek().cloned() {
             Some(Token::LParen) => {
                 self.advance();
                 let inner = self.parse_space_expr()?;
@@ -276,7 +209,7 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-                Space::Base(name.clone())
+                Space::Base(name)
             }
             _ => return Err("Invalid space expression".to_string()),
         };
@@ -286,17 +219,13 @@ impl Parser {
             let right = self.parse_space_expr()?;
             left = Space::Product(Box::new(left), Box::new(right));
         }
-
         Ok(left)
     }
 
     fn parse_flow_decl(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
         self.expect(Token::KwFlow)?;
-        if matches!(self.peek(), Some(Token::Ident(_))) {
-            self.advance();
-        }
+        if matches!(self.peek(), Some(Token::Ident(_))) { self.advance(); }
         self.expect(Token::Equals)?;
-
         let flow = self.parse_chain(registry)?;
         self.validate_flow(&flow, registry)?;
         Ok(flow)
@@ -305,41 +234,28 @@ impl Parser {
     fn validate_flow(&self, flow: &Flow, registry: &PrimitiveRegistry) -> Result<Space, String> {
         match flow {
             Flow::Identity => Ok(Space::Identity),
-            Flow::Primitive {
-                name,
-                domain,
-                codomain,
-                ..
-            } => {
-                let (expected_dom, expected_cod, _) = registry
-                    .get(name)
+            Flow::Primitive { name, domain, codomain, .. } => {
+                let (expected_domain, expected_codomain, _) = registry.get(name)
                     .ok_or_else(|| format!("Undefined primitive: {}", name))?;
-
-                if *domain != expected_dom || *codomain != expected_cod {
+                if *domain != expected_domain || *codomain != expected_codomain {
                     return Err(format!("Type mismatch for {}", name));
                 }
-
                 Ok(codomain.clone())
             }
-            Flow::Chain(f, g) => {
-                let f_cod = self.validate_flow(f, registry)?;
-                let g_dom = self.infer_domain(g, registry)?;
-
-                if f_cod != g_dom {
-                    return Err(format!(
-                        "Chain type mismatch: {:?} != {:?}",
-                        f_cod, g_dom
-                    ));
+            Flow::Chain(first, second) => {
+                let first_codomain = self.validate_flow(first, registry)?;
+                let second_domain = self.infer_domain(second, registry)?;
+                if first_codomain != second_domain {
+                    return Err(format!("Chain type mismatch: {:?} != {:?}", first_codomain, second_domain));
                 }
-
-                self.validate_flow(g, registry)
+                self.validate_flow(second, registry)
             }
-            Flow::Parallel(f, g) => {
-                let f_type = self.validate_flow(f, registry)?;
-                let g_type = self.validate_flow(g, registry)?;
-                Ok(Space::Product(Box::new(f_type), Box::new(g_type)))
+            Flow::Parallel(first, second) => {
+                let first_type = self.validate_flow(first, registry)?;
+                let second_type = self.validate_flow(second, registry)?;
+                Ok(Space::Product(Box::new(first_type), Box::new(second_type)))
             }
-            Flow::Feedback(f) => self.validate_flow(f, registry),
+            Flow::Feedback(inner) => self.validate_flow(inner, registry),
         }
     }
 
@@ -347,37 +263,32 @@ impl Parser {
         match flow {
             Flow::Identity => Ok(Space::Identity),
             Flow::Primitive { domain, .. } => Ok(domain.clone()),
-            Flow::Chain(f, _) => self.infer_domain(f, registry),
-            Flow::Parallel(f, g) => {
-                let f_domain = self.infer_domain(f, registry)?;
-                let g_domain = self.infer_domain(g, registry)?;
-                Ok(Space::Product(Box::new(f_domain), Box::new(g_domain)))
-            }
-            Flow::Feedback(f) => self.infer_domain(f, registry),
+            Flow::Chain(first, _) => self.infer_domain(first, registry),
+            Flow::Parallel(first, second) => Ok(Space::Product(
+                Box::new(self.infer_domain(first, registry)?),
+                Box::new(self.infer_domain(second, registry)?),
+            )),
+            Flow::Feedback(inner) => self.infer_domain(inner, registry),
         }
     }
 
     fn parse_chain(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
         let mut left = self.parse_parallel(registry)?;
-
-        while let Some(Token::OpChain) = self.peek() {
+        while matches!(self.peek(), Some(Token::OpChain)) {
             self.advance();
             let right = self.parse_parallel(registry)?;
             left = Flow::Chain(Box::new(left), Box::new(right));
         }
-
         Ok(left)
     }
 
     fn parse_parallel(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
         let mut left = self.parse_unary(registry)?;
-
-        while let Some(Token::OpParallel) = self.peek() {
+        while matches!(self.peek(), Some(Token::OpParallel)) {
             self.advance();
             let right = self.parse_unary(registry)?;
             left = Flow::Parallel(Box::new(left), Box::new(right));
         }
-
         Ok(left)
     }
 
@@ -400,27 +311,14 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-
-                let (domain, codomain, c_impl) = registry
-                    .get(&name)
-                    .or_else(|| {
-                        self.primitive_types.get(&name).map(|(dom, cod)| {
-                            (
-                                dom.clone(),
-                                cod.clone(),
-                                Self::get_default_impl(&name)
-                                    .unwrap_or_else(|| format!("/* {} not implemented */", name)),
-                            )
-                        })
-                    })
+                let (domain, codomain, c_impl) = registry.get(&name)
+                    .or_else(|| self.primitive_types.get(&name).map(|(domain, codomain)| (
+                        domain.clone(),
+                        codomain.clone(),
+                        Self::get_default_impl(&name).unwrap_or_else(|| format!("/* {} not implemented */", name)),
+                    )))
                     .ok_or_else(|| format!("Undefined primitive: {}", name))?;
-
-                Ok(Flow::Primitive {
-                    name,
-                    domain,
-                    codomain,
-                    c_impl,
-                })
+                Ok(Flow::Primitive { name, domain, codomain, c_impl })
             }
             _ => Err("Syntax error".to_string()),
         }
@@ -431,19 +329,9 @@ pub struct C99Emitter;
 
 impl C99Emitter {
     pub fn emit(flow: &Flow, registry: &PrimitiveRegistry) -> String {
-        let mut code = String::new();
-        code.push_str("#include <stdio.h>\n");
-        code.push_str("#include <stdlib.h>\n\n");
-        code.push_str("long long add(long long a, long long b) { return a + b; }\n");
-        code.push_str("long long mul(long long a, long long b) { return a * b; }\n");
-        code.push_str("void print_val(long long x) { printf(\"%lld\\n\", x); }\n\n");
-        code.push_str("int main(void) {\n");
-        code.push_str("    long long result = 0;\n");
-
+        let mut code = String::from("#include <stdio.h>\n\nint main(void) {\n    long long result = 0;\n");
         Self::codegen(flow, &mut code, registry, "result");
-
-        code.push_str("    return 0;\n");
-        code.push_str("}\n");
+        code.push_str("    return 0;\n}\n");
         code
     }
 
@@ -451,81 +339,55 @@ impl C99Emitter {
         match flow {
             Flow::Identity => {}
             Flow::Primitive { name, .. } => {
-                if let Some((_, _, impl_)) = registry.get(name) {
-                    code.push_str(&format!("    // Execute: {}\n", name));
-                    code.push_str(&format!("    {}\n", impl_));
-                } else {
-                    code.push_str(&format!("    // {} not implemented\n", name));
+                if let Some((_, _, implementation)) = registry.get(name) {
+                    code.push_str(&format!("    // Execute: {}\n    {}\n", name, implementation));
                 }
             }
-            Flow::Chain(f, g) => {
-                Self::codegen(f, code, registry, var);
-                Self::codegen(g, code, registry, var);
+            Flow::Chain(first, second) => {
+                Self::codegen(first, code, registry, var);
+                Self::codegen(second, code, registry, var);
             }
-            Flow::Parallel(f, g) => {
-                code.push_str(&format!("    long long f_res = {};\n", var));
-                code.push_str(&format!("    long long g_res = {};\n", var));
-                Self::codegen(f, code, registry, "f_res");
-                Self::codegen(g, code, registry, "g_res");
+            Flow::Parallel(first, second) => {
+                code.push_str(&format!("    long long f_res = {};\n    long long g_res = {};\n", var, var));
+                Self::codegen(first, code, registry, "f_res");
+                Self::codegen(second, code, registry, "g_res");
                 code.push_str(&format!("    {} = f_res + g_res;\n", var));
             }
-            Flow::Feedback(f) => {
-                Self::codegen(f, code, registry, var);
-            }
+            Flow::Feedback(inner) => Self::codegen(inner, code, registry, var),
         }
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        return;
-    }
+    if args.len() < 2 { return; }
 
     let code = match fs::read_to_string(&args[1]) {
         Ok(code) => code,
-        Err(err) => {
-            eprintln!("Failed to read file: {}", err);
-            return;
-        }
+        Err(error) => { eprintln!("Failed to read file: {}", error); return; }
     };
 
     let mut registry = PrimitiveRegistry::new();
     let mut parser = Parser::new(&code);
-
     let ast = match parser.parse(&mut registry) {
         Ok(ast) => ast,
-        Err(err) => {
-            eprintln!("Parse error: {}", err);
-            return;
-        }
+        Err(error) => { eprintln!("Parse error: {}", error); return; }
     };
 
-    if let Err(err) = parser.validate_flow(&ast, &registry) {
-        eprintln!("Type error: {}", err);
+    if let Err(error) = parser.validate_flow(&ast, &registry) {
+        eprintln!("Type error: {}", error);
         return;
     }
 
     let c_code = C99Emitter::emit(&ast, &registry);
-    if let Err(err) = fs::write("payload.c", &c_code) {
-        eprintln!("Failed to write payload.c: {}", err);
+    if let Err(error) = fs::write("payload.c", c_code) {
+        eprintln!("Failed to write payload.c: {}", error);
         return;
     }
 
-    let status = match Command::new("clang")
-        .args(["-O3", "payload.c", "-lm", "-o", "binary_app"])
-        .status()
-    {
-        Ok(status) => status,
-        Err(err) => {
-            eprintln!("Failed to execute clang: {}", err);
-            return;
-        }
-    };
-
-    if status.success() {
-        println!("Compiled successfully!");
-    } else {
-        eprintln!("C compilation failed");
+    match Command::new("clang").args(["-O3", "payload.c", "-lm", "-o", "binary_app"]).status() {
+        Ok(status) if status.success() => println!("Compiled successfully!"),
+        Ok(_) => eprintln!("C compilation failed"),
+        Err(error) => eprintln!("Failed to execute clang: {}", error),
     }
 }
