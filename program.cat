@@ -1,0 +1,6 @@
+// Universal Categorical Language Script
+space Tensor = Array<128>
+space Qubit = Quantum<2>
+space Organoid = MEA<64>
+
+flow HybridPipeline = (neural_layer || quantum_gate || organoid_pulse) >> ~(neural_layer || quantum_gate || organoid_pulse)
