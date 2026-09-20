@@ -61,6 +61,47 @@ pub enum Flow {
     Feedback(Box<Flow>),
 }
 
+impl Flow {
+    pub fn grad(&self, registry: &PrimitiveRegistry) -> Flow {
+        match self {
+            Flow::Identity { space } => Flow::Identity { space: space.clone() },
+            Flow::Primitive { name, domain, codomain, c_impl } => {
+                let primitive = registry
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(Primitive {
+                        name: format!("grad_{}", name),
+                        domain: domain.clone(),
+                        codomain: codomain.clone(),
+                        derivative: DerivativeRule::Analytic,
+                        effects: vec![Effect::Pure],
+                        implementations: HashMap::new(),
+                    });
+
+                Flow::Primitive {
+                    name: format!("grad_{}", name),
+                    domain: codomain.clone(),
+                    codomain: domain.clone(),
+                    c_impl: primitive.reverse_default_impl(Backend::C99Cpu).replace("/* ", "").replace(" */", "").trim().to_string(),
+                }
+            }
+            Flow::Chain(first, second) => {
+                let grad_second = second.grad(registry);
+                let grad_first = first.grad(registry);
+                Flow::Chain(Box::new(grad_second), Box::new(grad_first))
+            }
+            Flow::Parallel(first, second) => {
+                let grad_first = first.grad(registry);
+                let grad_second = second.grad(registry);
+                Flow::Parallel(Box::new(grad_first), Box::new(grad_second))
+            }
+            Flow::Feedback(inner) => {
+                Flow::Feedback(Box::new(inner.grad(registry)))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Primitive {
     pub name: String,
@@ -80,6 +121,7 @@ impl Primitive {
     }
 
     pub fn reverse_default_impl(&self, backend: Backend) -> String {
+        let _ = backend;
         match self.derivative {
             DerivativeRule::Analytic => format!("/* reverse of {} */", self.name),
             DerivativeRule::ReverseMode => format!("/* reverse-mode pass for {} */", self.name),
@@ -535,7 +577,7 @@ impl Parser {
                 return Err(format!(
                     "Declared domain {:?} does not match inferred domain {:?}",
                     domain, inferred_domain
-                ));
+                 ));
             }
         }
 
@@ -674,7 +716,7 @@ impl Parser {
 
 pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> PortGraph {
     let mut graph = PortGraph::new();
-    let mut node_index = 0usize;
+    let mut index = 0usize;
 
     fn walk(flow: &Flow, registry: &PrimitiveRegistry, graph: &mut PortGraph, index: &mut usize) {
         match flow {
@@ -724,7 +766,7 @@ pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> Po
         }
     }
 
-    walk(flow, registry, &mut graph, &mut node_index);
+    walk(flow, registry, &mut graph, &mut index);
     graph
 }
 
@@ -820,9 +862,10 @@ fn main() {
         return;
     }
 
+    let reverse_ast = ast.grad(&registry);
     let graph = lower_flow_to_port_graph(&ast, &registry);
-    let reversed = reverse_port_graph(&graph);
-    let _ = (graph, reversed);
+    let reversed_graph = reverse_port_graph(&graph);
+    let _ = (reverse_ast, reversed_graph);
 
     let c_code = C99Emitter::emit(&ast, &registry);
     if let Err(error) = fs::write("payload.c", c_code) {
