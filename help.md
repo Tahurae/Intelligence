@@ -69,16 +69,20 @@ The repository is organized into four clean directories:
 
 ## 5. Built-in Tool: The `note` Editor
 
-ILang includes a globally available terminal editor (`note`) built entirely using these concepts.
+ILang includes a globally available terminal editor built entirely using these concepts.
 
 * **Binary Location:** `$PREFIX/bin/note`
 * **Storage File:** `~/.ilang_repository.txt`
 
-### Keyboard Controls
-* **`Ctrl + S`:** Save current note with a timestamp and tag.
-* **`Ctrl + R`:** Open and view previously saved notes.
-* **`Ctrl + T`:** Switch or create a new organizational tag.
-* **`Ctrl + X`:** Exit the editor.
+### Terminal Launch Shortcuts
+* **`note`**: Launches the interactive terminal editor directly.
+* **`notes`**: Alias shortcut to open the editor and immediately view stored repository records.
+
+### Keyboard Controls Inside Editor
+* **`Ctrl + S`**: Save current note with an automatic timestamp and tag.
+* **`Ctrl + R`**: Open and view previously saved notes from the repository.
+* **`Ctrl + T`**: Switch or create a new organizational tag.
+* **`Ctrl + X`**: Exit the editor safely.
 
 ---
 
