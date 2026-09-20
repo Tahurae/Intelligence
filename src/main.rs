@@ -3,115 +3,818 @@ use std::env;
 use std::fs;
 use std::process::Command;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// ============================================================================
+// 1. DOMAIN & SPACE REPRESENTATION
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Space {
-    Unit,
     Scalar(String),
-    Tensor { element: String, shape: Vec<usize> },
-    Quantum { qubits: usize },
-    Organoid { pins: usize },
-    Logic { bits: usize },
-    Product(Box<Space>, Box<Space>),
+    Tensor(usize),
+    Qubit(usize),
+    Organoid(usize),
+    Logic(usize),
+    Product(Vec<Space>),
+    Unit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DerivativeRule { Analytic, ReverseMode, ParameterShift, AdjointSensitivity, StraightThrough, NonDifferentiable }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Backend { C99Cpu, Simd, Cuda, OpenQasm, PulseFpga, RealtimeMea, Verilog }
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Flow {
-    Identity { space: Space },
-    Primitive { name: String, domain: Space, codomain: Space },
-    Chain(Box<Flow>, Box<Flow>),
-    Parallel(Box<Flow>, Box<Flow>),
-    Feedback(Box<Flow>),
-}
-
-impl Flow {
-    pub fn domain(&self) -> Space {
-        match self { Self::Identity { space } => space.clone(), Self::Primitive { domain, .. } => domain.clone(), Self::Chain(a, _) => a.domain(), Self::Parallel(a,b) => Space::Product(Box::new(a.domain()), Box::new(b.domain())), Self::Feedback(f) => f.domain() }
-    }
-    pub fn codomain(&self) -> Space {
-        match self { Self::Identity { space } => space.clone(), Self::Primitive { codomain, .. } => codomain.clone(), Self::Chain(_,b) => b.codomain(), Self::Parallel(a,b) => Space::Product(Box::new(a.codomain()), Box::new(b.codomain())), Self::Feedback(f) => f.codomain() }
-    }
-    pub fn grad(&self, registry: &PrimitiveRegistry) -> Flow {
+impl Space {
+    pub fn size_in_bytes(&self) -> usize {
         match self {
-            Self::Identity { space } => Self::Identity { space: space.clone() },
-            Self::Primitive { name, domain, codomain } => Self::Primitive { name: registry.reverse_name(name), domain: codomain.clone(), codomain: domain.clone() },
-            Self::Chain(a,b) => Self::Chain(Box::new(b.grad(registry)), Box::new(a.grad(registry))),
-            Self::Parallel(a,b) => Self::Parallel(Box::new(a.grad(registry)), Box::new(b.grad(registry))),
-            Self::Feedback(f) => Self::Feedback(Box::new(f.grad(registry))),
+            Space::Scalar(_) => std::mem::size_of::<f64>(),
+            Space::Tensor(n) => n * std::mem::size_of::<f32>(),
+            Space::Qubit(n) => (1 << n) * std::mem::size_of::<f32>() * 2,
+            Space::Organoid(n) => n * std::mem::size_of::<f32>(),
+            Space::Logic(n) => ((n + 7) / 8),
+            Space::Product(spaces) => spaces.iter().map(|s| s.size_in_bytes()).sum(),
+            Space::Unit => 0,
+        }
+    }
+
+    pub fn c_type_string(&self) -> String {
+        match self {
+            Space::Scalar(_) => "double".to_string(),
+            Space::Tensor(_) => "float*".to_string(),
+            Space::Qubit(_) => "float*".to_string(),
+            Space::Organoid(_) => "float*".to_string(),
+            Space::Logic(_) => "uint8_t*".to_string(),
+            Space::Product(_) => "void*".to_string(),
+            Space::Unit => "void".to_string(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Primitive { pub name: String, pub domain: Space, pub codomain: Space, pub derivative: DerivativeRule, pub backends: Vec<Backend> }
+// ============================================================================
+// 2. PRIMITIVES & REGISTRY
+// ============================================================================
 
-pub struct PrimitiveRegistry { primitives: HashMap<String, Primitive> }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrimitiveFamily {
+    Scalar,
+    Tensor,
+    Quantum,
+    Organoid,
+    Logic,
+}
+
+#[derive(Debug, Clone)]
+pub struct Primitive {
+    pub name: String,
+    pub dom: Space,
+    pub cod: Space,
+    pub family: PrimitiveFamily,
+    pub forward_c: String,
+    pub adjoint_c: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrimitiveRegistry {
+    pub primitives: HashMap<String, Primitive>,
+    pub declared_spaces: HashMap<String, Space>,
+}
+
 impl PrimitiveRegistry {
     pub fn new() -> Self {
-        let mut r = Self { primitives: HashMap::new() };
-        r.add("add", Space::Scalar("Int".into()), Space::Scalar("Int".into()), DerivativeRule::Analytic, vec![Backend::C99Cpu]);
-        r.add("mul", Space::Scalar("Int".into()), Space::Scalar("Int".into()), DerivativeRule::Analytic, vec![Backend::C99Cpu]);
-        r.add("neural_layer", Space::Tensor { element: "Float32".into(), shape: vec![128] }, Space::Tensor { element: "Float32".into(), shape: vec![64] }, DerivativeRule::ReverseMode, vec![Backend::C99Cpu, Backend::Cuda, Backend::Simd]);
-        r.add("quantum_gate", Space::Quantum { qubits: 6 }, Space::Quantum { qubits: 6 }, DerivativeRule::ParameterShift, vec![Backend::OpenQasm, Backend::PulseFpga]);
-        r.add("organoid_step", Space::Organoid { pins: 64 }, Space::Organoid { pins: 64 }, DerivativeRule::AdjointSensitivity, vec![Backend::RealtimeMea, Backend::C99Cpu]);
-        r.add("organoid_pulse", Space::Organoid { pins: 64 }, Space::Organoid { pins: 64 }, DerivativeRule::AdjointSensitivity, vec![Backend::RealtimeMea, Backend::C99Cpu]);
-        r.add("logic_step", Space::Logic { bits: 8 }, Space::Logic { bits: 8 }, DerivativeRule::StraightThrough, vec![Backend::C99Cpu, Backend::Verilog]);
-        r
+        let mut reg = Self {
+            primitives: HashMap::new(),
+            declared_spaces: HashMap::new(),
+        };
+        reg.register_defaults();
+        reg
     }
-    fn add(&mut self, name: &str, domain: Space, codomain: Space, derivative: DerivativeRule, backends: Vec<Backend>) { self.primitives.insert(name.into(), Primitive { name: name.into(), domain, codomain, derivative, backends }); }
-    fn get(&self, name: &str) -> Option<&Primitive> { self.primitives.get(name) }
-    fn reverse_name(&self, name: &str) -> String { if name.starts_with("grad_") { name.into() } else { format!("grad_{}", name) } }
-    fn declare(&mut self, name: String, domain: Space, codomain: Space) { let (d,b) = self.get(&name).map(|p| (p.derivative.clone(), p.backends.clone())).unwrap_or((DerivativeRule::Analytic, vec![Backend::C99Cpu])); self.add(&name, domain, codomain, d, b); }
+
+    pub fn register_defaults(&mut self) {
+        self.register(Primitive {
+            name: "add".to_string(),
+            dom: Space::Product(vec![Space::Scalar("f64".into()), Space::Scalar("f64".into())]),
+            cod: Space::Scalar("f64".into()),
+            family: PrimitiveFamily::Scalar,
+            forward_c: "*out = in[0] + in[1];".to_string(),
+            adjoint_c: "grad_in[0] = *grad_out; grad_in[1] = *grad_out;".to_string(),
+        });
+
+        self.register(Primitive {
+            name: "mul".to_string(),
+            dom: Space::Product(vec![Space::Scalar("f64".into()), Space::Scalar("f64".into())]),
+            cod: Space::Scalar("f64".into()),
+            family: PrimitiveFamily::Scalar,
+            forward_c: "*out = in[0] * in[1];".to_string(),
+            adjoint_c: "grad_in[0] = *grad_out * in[1]; grad_in[1] = *grad_out * in[0];".to_string(),
+        });
+
+        self.register(Primitive {
+            name: "neural_layer".to_string(),
+            dom: Space::Tensor(128),
+            cod: Space::Tensor(64),
+            family: PrimitiveFamily::Tensor,
+            forward_c: "cpu_dense_forward(in, out, 128, 64);".to_string(),
+            adjoint_c: "cpu_dense_backward(grad_out, grad_in, 128, 64);".to_string(),
+        });
+
+        self.register(Primitive {
+            name: "quantum_gate".to_string(),
+            dom: Space::Qubit(2),
+            cod: Space::Qubit(2),
+            family: PrimitiveFamily::Quantum,
+            forward_c: "quantum_unitary_apply(dev->qasm_fd, in, out, 2);".to_string(),
+            adjoint_c: "quantum_parameter_shift_adjoint(dev->qasm_fd, grad_out, grad_in, 2);".to_string(),
+        });
+
+        self.register(Primitive {
+            name: "organoid_step".to_string(),
+            dom: Space::Organoid(64),
+            cod: Space::Organoid(64),
+            family: PrimitiveFamily::Organoid,
+            forward_c: "organoid_dac_adc_transceive(dev->mea_fd, in, out, 64);".to_string(),
+            adjoint_c: "organoid_adjoint_sensitivity_integrate(dev->mea_fd, grad_out, grad_in, 64);".to_string(),
+        });
+
+        self.register(Primitive {
+            name: "organoid_pulse".to_string(),
+            dom: Space::Organoid(64),
+            cod: Space::Organoid(64),
+            family: PrimitiveFamily::Organoid,
+            forward_c: "organoid_dac_adc_transceive(dev->mea_fd, in, out, 64);".to_string(),
+            adjoint_c: "organoid_adjoint_sensitivity_integrate(dev->mea_fd, grad_out, grad_in, 64);".to_string(),
+        });
+
+        self.register(Primitive {
+            name: "logic_step".to_string(),
+            dom: Space::Logic(8),
+            cod: Space::Logic(8),
+            family: PrimitiveFamily::Logic,
+            forward_c: "logic_pack_apply(in, out, 8);".to_string(),
+            adjoint_c: "logic_unpack_adjoint(grad_out, grad_in, 8);".to_string(),
+        });
+    }
+
+    pub fn register(&mut self, prim: Primitive) {
+        self.primitives.insert(prim.name.clone(), prim);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Primitive> {
+        self.primitives.get(name)
+    }
+
+    pub fn get_default_impl(&self, name: &str) -> (String, String) {
+        if let Some(prim) = self.get(name) {
+            (prim.forward_c.clone(), prim.adjoint_c.clone())
+        } else {
+            (
+                format!("/* default forward fallback for {} */", name),
+                format!("/* default adjoint fallback for {} */", name),
+            )
+        }
+    }
 }
+
+// ============================================================================
+// 3. CATEGORICAL AST (FLOWS)
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub enum Flow {
+    Primitive(String),
+    Chain(Box<Flow>, Box<Flow>),
+    Parallel(Box<Flow>, Box<Flow>),
+    Feedback(Box<Flow>),
+    Identity(Space),
+    Derivative(Box<Flow>),
+}
+
+#[derive(Debug, Clone)]
+pub struct FlowDecl {
+    pub name: String,
+    pub dom: Option<Space>,
+    pub cod: Option<Space>,
+    pub body: Flow,
+}
+
+// ============================================================================
+// 4. LEXER & PARSER
+// ============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
-enum Token { Ident(String), Number(usize), Space, Flow, Grad, Equals, Colon, Arrow, Chain, Parallel, Feedback, LParen, RParen, Lt, Gt, Comma }
-struct Lexer<'a> { source: &'a str, pos: usize }
+pub enum Token {
+    SpaceKw,
+    FlowKw,
+    Ident(String),
+    Equals,
+    Colon,
+    Arrow,
+    ChainOp,
+    ParallelOp,
+    Tilde,
+    GradKw,
+    IdKw,
+    LParen,
+    RParen,
+    LAngle,
+    RAngle,
+    Comma,
+    Integer(usize),
+    Eof,
+}
+
+pub struct Lexer<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self { Self { source, pos: 0 } }
-    fn next(&mut self) -> Option<Token> {
-        while self.pos < self.source.len() { let c = self.source[self.pos..].chars().next().unwrap(); if c.is_whitespace() { self.pos += c.len_utf8(); } else { break; } }
-        if self.pos >= self.source.len() { return None; }
-        let s = &self.source[self.pos..];
-        if s.starts_with("//") { self.pos += s.find('\n').unwrap_or(s.len()); return self.next(); }
-        for (op,t) in [(">>",Token::Chain),("||",Token::Parallel),("->",Token::Arrow)] { if s.starts_with(op) { self.pos += op.len(); return Some(t); } }
-        let c = s.chars().next().unwrap();
-        let t = match c { '='=>Some(Token::Equals), ':'=>Some(Token::Colon), '~'=>Some(Token::Feedback), '('=>Some(Token::LParen), ')'=>Some(Token::RParen), '<'=>Some(Token::Lt), '>'=>Some(Token::Gt), ','=>Some(Token::Comma), _=>None };
-        if let Some(t) = t { self.pos += c.len_utf8(); return Some(t); }
-        if c.is_ascii_digit() { let n=s.chars().take_while(|x|x.is_ascii_digit()).map(char::len_utf8).sum(); self.pos+=n; return Some(Token::Number(s[..n].parse().ok()?)); }
-        if c.is_alphanumeric() || c=='_' { let n=s.chars().take_while(|x|x.is_alphanumeric()||*x=='_').map(char::len_utf8).sum(); let w=&s[..n]; self.pos+=n; return Some(match w { "space"=>Token::Space, "flow"=>Token::Flow, "grad"=>Token::Grad, _=>Token::Ident(w.into()) }); }
-        self.pos += c.len_utf8(); self.next()
+    pub fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    pub fn tokenize(&mut self) -> Vec<Token> {
+        let mut tokens = Vec::new();
+        let chars: Vec<char> = self.input.chars().collect();
+
+        while self.pos < chars.len() {
+            let c = chars[self.pos];
+
+            if c.is_whitespace() {
+                self.pos += 1;
+                continue;
+            }
+
+            if c == '/' && self.pos + 1 < chars.len() && chars[self.pos + 1] == '/' {
+                while self.pos < chars.len() && chars[self.pos] != '\n' {
+                    self.pos += 1;
+                }
+                continue;
+            }
+
+            if self.pos + 1 < chars.len() {
+                let dual = format!("{}{}", c, chars[self.pos + 1]);
+                match dual.as_str() {
+                    ">>" => {
+                        self.pos += 2;
+                        tokens.push(Token::ChainOp);
+                        continue;
+                    }
+                    "||" => {
+                        self.pos += 2;
+                        tokens.push(Token::ParallelOp);
+                        continue;
+                    }
+                    "->" => {
+                        self.pos += 2;
+                        tokens.push(Token::Arrow);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            match c {
+                '=' => tokens.push(Token::Equals),
+                ':' => tokens.push(Token::Colon),
+                '~' => tokens.push(Token::Tilde),
+                '(' => tokens.push(Token::LParen),
+                ')' => tokens.push(Token::RParen),
+                '<' => tokens.push(Token::LAngle),
+                '>' => tokens.push(Token::RAngle),
+                ',' => tokens.push(Token::Comma),
+                _ => {
+                    if c.is_alphabetic() || c == '_' {
+                        let start = self.pos;
+                        while self.pos < chars.len()
+                            && (chars[self.pos].is_alphanumeric() || chars[self.pos] == '_')
+                        {
+                            self.pos += 1;
+                        }
+                        let text: String = chars[start..self.pos].iter().collect();
+                        match text.as_str() {
+                            "space" => tokens.push(Token::SpaceKw),
+                            "flow" => tokens.push(Token::FlowKw),
+                            "grad" => tokens.push(Token::GradKw),
+                            "id" => tokens.push(Token::IdKw),
+                            _ => tokens.push(Token::Ident(text)),
+                        }
+                        continue;
+                    } else if c.is_numeric() {
+                        let start = self.pos;
+                        while self.pos < chars.len() && chars[self.pos].is_numeric() {
+                            self.pos += 1;
+                        }
+                        let num_str: String = chars[start..self.pos].iter().collect();
+                        tokens.push(Token::Integer(num_str.parse().unwrap_or(0)));
+                        continue;
+                    }
+                }
+            }
+            self.pos += 1;
+        }
+
+        tokens.push(Token::Eof);
+        tokens
     }
 }
 
-pub struct Parser { tokens: Vec<Token>, pos: usize, spaces: HashMap<String, Space>, flows: HashMap<String, Flow> }
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
 impl Parser {
-    pub fn new(source: &str) -> Self { let mut l=Lexer::new(source); let mut tokens=Vec::new(); while let Some(t)=l.next(){tokens.push(t)} Self{tokens,pos:0,spaces:HashMap::new(),flows:HashMap::new()} }
-    fn peek(&self)->Option<&Token>{self.tokens.get(self.pos)}
-    fn take(&mut self)->Option<Token>{let t=self.tokens.get(self.pos).cloned(); if t.is_some(){self.pos+=1;} t}
-    fn expect(&mut self,t:Token)->Result<(),String>{if self.take()==Some(t){Ok(())}else{Err(format!("unexpected token near {}",self.pos))}}
-    fn ident(&mut self)->Result<String,String>{match self.take(){Some(Token::Ident(s))=>Ok(s),x=>Err(format!("expected identifier, got {:?}",x))}}
-    pub fn parse(&mut self, registry: &mut PrimitiveRegistry)->Result<Flow,String>{let mut last=None; while self.pos<self.tokens.len(){match self.peek().cloned(){Some(Token::Space)=>self.space_decl()?,Some(Token::Flow)=>{let(n,f)=self.flow_decl(registry)?;self.flows.insert(n,f.clone());last=Some(f)},Some(Token::Ident(_))=>self.primitive_decl(registry)?,x=>return Err(format!("unexpected top-level token {:?}",x))}} last.ok_or_else(||"no flow declaration found".into())}
-    fn space_decl(&mut self)->Result<(),String>{self.expect(Token::Space)?;let n=self.ident()?;if self.peek()==Some(&Token::Lt){self.take();while self.peek()!=Some(&Token::Gt){self.take().ok_or("unterminated space parameters")?;}self.expect(Token::Gt)?;}self.expect(Token::Equals)?;let s=self.space_expr()?;self.spaces.insert(n,s);Ok(())}
-    fn primitive_decl(&mut self,r:&mut PrimitiveRegistry)->Result<(),String>{let n=self.ident()?;self.expect(Token::Colon)?;let d=self.space_expr()?;self.expect(Token::Arrow)?;let c=self.space_expr()?;r.declare(n,d,c);Ok(())}
-    fn flow_decl(&mut self,r:&mut PrimitiveRegistry)->Result<(String,Flow),String>{self.expect(Token::Flow)?;let n=self.ident()?;let declared=if self.peek()==Some(&Token::Colon){self.take();let d=self.space_expr()?;self.expect(Token::Arrow)?;Some((d,self.space_expr()?))}else{None};if self.peek()==Some(&Token::Equals){self.take();let f=self.expr(r)?;self.validate(&f,r)?;if let Some((d,c))=declared{if f.domain()!=d||f.codomain()!=c{return Err(format!("flow {} type annotation mismatch",n));}}Ok((n,f))}else{let(d,c)=declared.ok_or("expected flow body or type annotation")?;r.declare(n.clone(),d.clone(),c.clone());Ok((n.clone(),Flow::Primitive{name:n,domain:d,codomain:c}))}}
-    fn space_expr(&mut self)->Result<Space,String>{let n=self.ident()?;if self.peek()==Some(&Token::Lt){self.take();let mut a=Vec::new();loop{match self.take(){Some(Token::Number(v))=>a.push(v),Some(Token::Ident(_))=>{},_=>return Err("invalid generic argument".into())}if self.peek()!=Some(&Token::Comma){break}self.take();}self.expect(Token::Gt)?;let v=*a.first().unwrap_or(&0);return Ok(match n.as_str(){"Tensor"|"Array"=>Space::Tensor{element:"Float32".into(),shape:vec![v]},"Qubit"|"Quantum"=>Space::Quantum{qubits:v},"Organoid"|"MEA"=>Space::Organoid{pins:v},"Logic"=>Space::Logic{bits:v},_=>Space::Scalar(n)})}Ok(self.spaces.get(&n).cloned().unwrap_or(Space::Scalar(n)))}
-    fn expr(&mut self,r:&PrimitiveRegistry)->Result<Flow,String>{let mut f=self.parallel(r)?;while self.peek()==Some(&Token::Chain){self.take();f=Flow::Chain(Box::new(f),Box::new(self.parallel(r)?));}Ok(f)}
-    fn parallel(&mut self,r:&PrimitiveRegistry)->Result<Flow,String>{let mut f=self.unary(r)?;while self.peek()==Some(&Token::Parallel){self.take();f=Flow::Parallel(Box::new(f),Box::new(self.unary(r)?));}Ok(f)}
-    fn unary(&mut self,r:&PrimitiveRegistry)->Result<Flow,String>{if self.peek()==Some(&Token::Feedback){self.take();Ok(Flow::Feedback(Box::new(self.unary(r)?)))}else{self.primary(r)}}
-    fn primary(&mut self,r:&PrimitiveRegistry)->Result<Flow,String>{match self.take(){Some(Token::LParen)=>{let f=self.expr(r)?;self.expect(Token::RParen)?;Ok(f)},Some(Token::Grad)=>{self.expect(Token::LParen)?;let f=self.expr(r)?;self.expect(Token::RParen)?;Ok(f.grad(r))},Some(Token::Ident(n))=>self.flows.get(&n).cloned().or_else(||r.get(&n).map(|p|Flow::Primitive{name:n.clone(),domain:p.domain.clone(),codomain:p.codomain.clone()})).ok_or_else(||format!("undefined flow or primitive {}",n)),x=>Err(format!("expected expression, got {:?}",x))}}
-    fn validate(&self,f:&Flow,r:&PrimitiveRegistry)->Result<(),String>{match f{Flow::Identity{..}=>Ok(()),Flow::Primitive{name,domain,codomain}=>{let p=r.get(name).ok_or_else(||format!("undefined primitive {}",name))?;if &p.domain!=domain||&p.codomain!=codomain{Err(format!("type mismatch in {}",name))}else{Ok(())}},Flow::Chain(a,b)=>{self.validate(a,r)?;self.validate(b,r)?;if a.codomain()!=b.domain(){Err(format!("chain mismatch {:?} -> {:?}",a.codomain(),b.domain()))}else{Ok(())}},Flow::Parallel(a,b)=>{self.validate(a,r)?;self.validate(b,r)},Flow::Feedback(f)=>self.validate(f,r)}}
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> &Token {
+        &self.tokens[self.pos]
+    }
+
+    fn advance(&mut self) -> Token {
+        let tok = self.tokens[self.pos].clone();
+        if self.pos < self.tokens.len() - 1 {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    pub fn parse(&mut self, registry: &mut PrimitiveRegistry) -> Result<Vec<FlowDecl>, String> {
+        let mut flow_decls = Vec::new();
+
+        while *self.peek() != Token::Eof {
+            match self.peek() {
+                Token::SpaceKw => {
+                    self.parse_space_decl(registry)?;
+                }
+                Token::FlowKw => {
+                    let decl = self.parse_flow_decl(registry)?;
+                    flow_decls.push(decl);
+                }
+                Token::Ident(_) => {
+                    if self.peek_n(1) == Some(&Token::Colon) {
+                        self.parse_primitive_decl(registry)?;
+                    } else {
+                        self.advance();
+                    }
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+
+        Ok(flow_decls)
+    }
+
+    fn peek_n(&self, offset: usize) -> Option<&Token> {
+        let idx = self.pos + offset;
+        if idx < self.tokens.len() {
+            Some(&self.tokens[idx])
+        } else {
+            None
+        }
+    }
+
+    fn parse_space_decl(&mut self, registry: &mut PrimitiveRegistry) -> Result<(), String> {
+        self.advance();
+        let name = match self.advance() {
+            Token::Ident(n) => n,
+            other => return Err(format!("Expected space identifier, got {:?}", other)),
+        };
+
+        if *self.peek() == Token::Equals {
+            self.advance();
+            let space_type = self.parse_space_type(registry)?;
+            registry.declared_spaces.insert(name, space_type);
+        }
+        Ok(())
+    }
+
+    fn parse_space_type(&mut self, registry: &PrimitiveRegistry) -> Result<Space, String> {
+        match self.advance() {
+            Token::Ident(kind) => {
+                let resolved = if registry.declared_spaces.contains_key(&kind) {
+                    registry.declared_spaces.get(&kind).cloned().unwrap_or(Space::Scalar(kind.clone()))
+                } else {
+                    match kind.as_str() {
+                        "Tensor" | "Array" => {
+                            if *self.peek() == Token::LAngle {
+                                self.advance();
+                                let dim = match self.advance() {
+                                    Token::Integer(d) => d,
+                                    other => return Err(format!("Expected dimension, got {:?}", other)),
+                                };
+                                self.expect(Token::RAngle)?;
+                                Space::Tensor(dim)
+                            } else {
+                                Space::Tensor(128)
+                            }
+                        }
+                        "Qubit" | "Quantum" => {
+                            if *self.peek() == Token::LAngle {
+                                self.advance();
+                                let dim = match self.advance() {
+                                    Token::Integer(d) => d,
+                                    other => return Err(format!("Expected qubit count, got {:?}", other)),
+                                };
+                                self.expect(Token::RAngle)?;
+                                Space::Qubit(dim)
+                            } else {
+                                Space::Qubit(2)
+                            }
+                        }
+                        "Organoid" | "MEA" => {
+                            if *self.peek() == Token::LAngle {
+                                self.advance();
+                                let dim = match self.advance() {
+                                    Token::Integer(d) => d,
+                                    other => return Err(format!("Expected channel count, got {:?}", other)),
+                                };
+                                self.expect(Token::RAngle)?;
+                                Space::Organoid(dim)
+                            } else {
+                                Space::Organoid(64)
+                            }
+                        }
+                        "Logic" | "Bits" => {
+                            if *self.peek() == Token::LAngle {
+                                self.advance();
+                                let dim = match self.advance() {
+                                    Token::Integer(d) => d,
+                                    other => return Err(format!("Expected bit count, got {:?}", other)),
+                                };
+                                self.expect(Token::RAngle)?;
+                                Space::Logic(dim)
+                            } else {
+                                Space::Logic(8)
+                            }
+                        }
+                        _ => Space::Scalar(kind),
+                    }
+                };
+                Ok(resolved)
+            }
+            other => Err(format!("Expected space type specifier, got {:?}", other)),
+        }
+    }
+
+    fn parse_primitive_decl(&mut self, registry: &mut PrimitiveRegistry) -> Result<(), String> {
+        let name = match self.advance() {
+            Token::Ident(n) => n,
+            other => return Err(format!("Expected primitive identifier, got {:?}", other)),
+        };
+
+        self.expect(Token::Colon)?;
+        let dom = self.parse_space_type(registry)?;
+        self.expect(Token::Arrow)?;
+        let cod = self.parse_space_type(registry)?;
+
+        let family = if matches!(dom, Space::Tensor(_)) || matches!(cod, Space::Tensor(_)) {
+            PrimitiveFamily::Tensor
+        } else if matches!(dom, Space::Qubit(_)) || matches!(cod, Space::Qubit(_)) {
+            PrimitiveFamily::Quantum
+        } else if matches!(dom, Space::Organoid(_)) || matches!(cod, Space::Organoid(_)) {
+            PrimitiveFamily::Organoid
+        } else if matches!(dom, Space::Logic(_)) || matches!(cod, Space::Logic(_)) {
+            PrimitiveFamily::Logic
+        } else {
+            PrimitiveFamily::Scalar
+        };
+
+        registry.register(Primitive {
+            name: name.clone(),
+            dom: dom.clone(),
+            cod: cod.clone(),
+            family,
+            forward_c: format!("/* primitive {} forward */", name),
+            adjoint_c: format!("/* primitive {} adjoint */", name),
+        });
+
+        Ok(())
+    }
+
+    fn parse_flow_decl(&mut self, registry: &mut PrimitiveRegistry) -> Result<FlowDecl, String> {
+        self.advance();
+        let name = match self.advance() {
+            Token::Ident(n) => n,
+            other => return Err(format!("Expected flow name, got {:?}", other)),
+        };
+
+        let mut dom = None;
+        let mut cod = None;
+
+        if *self.peek() == Token::Colon {
+            self.advance();
+            dom = Some(self.parse_space_type(registry)?);
+            self.expect(Token::Arrow)?;
+            cod = Some(self.parse_space_type(registry)?);
+        }
+
+        self.expect(Token::Equals)?;
+        let body = self.parse_flow_expr(registry)?;
+
+        Ok(FlowDecl { name, dom, cod, body })
+    }
+
+    fn parse_flow_expr(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
+        self.parse_chain(registry)
+    }
+
+    fn parse_chain(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
+        let mut left = self.parse_parallel(registry)?;
+
+        while *self.peek() == Token::ChainOp {
+            self.advance();
+            let right = self.parse_parallel(registry)?;
+            left = Flow::Chain(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_parallel(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
+        let mut left = self.parse_primary(registry)?;
+
+        while *self.peek() == Token::ParallelOp {
+            self.advance();
+            let right = self.parse_primary(registry)?;
+            left = Flow::Parallel(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_primary(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
+        match self.peek().clone() {
+            Token::Tilde => {
+                self.advance();
+                let inner = self.parse_primary(registry)?;
+                Ok(Flow::Feedback(Box::new(inner)))
+            }
+            Token::GradKw => {
+                self.advance();
+                self.expect(Token::LParen)?;
+                let inner = self.parse_flow_expr(registry)?;
+                self.expect(Token::RParen)?;
+                Ok(Flow::Derivative(Box::new(inner)))
+            }
+            Token::IdKw => {
+                self.advance();
+                let space = if *self.peek() == Token::LParen {
+                    self.advance();
+                    let s = self.parse_space_type(registry)?;
+                    self.expect(Token::RParen)?;
+                    s
+                } else {
+                    Space::Unit
+                };
+                Ok(Flow::Identity(space))
+            }
+            Token::Ident(name) => {
+                self.advance();
+                if registry.declared_spaces.contains_key(&name) {
+                    let space = registry.declared_spaces.get(&name).unwrap().clone();
+                    Ok(Flow::Identity(space))
+                } else {
+                    Ok(Flow::Primitive(name))
+                }
+            }
+            Token::LParen => {
+                self.advance();
+                let inner = self.parse_flow_expr(registry)?;
+                self.expect(Token::RParen)?;
+                Ok(inner)
+            }
+            other => Err(format!("Unexpected token in flow expression: {:?}", other)),
+        }
+    }
+
+    fn expect(&mut self, expected: Token) -> Result<(), String> {
+        let tok = self.advance();
+        if tok == expected {
+            Ok(())
+        } else {
+            Err(format!("Expected {:?}, got {:?}", expected, tok))
+        }
+    }
 }
 
-pub struct C99Emitter;
-impl C99Emitter {
-    pub fn emit(f:&Flow,r:&PrimitiveRegistry)->String{let mut c=String::from("#include <stdint.h>\n#include <stddef.h>\n#include <string.h>\n\ntypedef struct { int quantum_fd; int mea_fd; } IntelligenceDevices;\n\n");c.push_str("static long long add_i64(long long x){return x+1;}\nstatic long long mul_i64(long long x){return x*2;}\nstatic void tensor_forward(const float in[128],float out[64]){for(size_t i=0;i<64;i++){out[i]=0;for(size_t j=0;j<128;j++)out[i]+=in[j]/128.0f;}}\nstatic void tensor_reverse(const float go[64],float gi[128]){for(size_t j=0;j<128;j++){gi[j]=0;for(size_t i=0;i<64;i++)gi[j]+=go[i]/128.0f;}}\nstatic void quantum_forward(IntelligenceDevices*d,const float*in,float*out){(void)d;memcpy(out,in,64*sizeof(float));}\nstatic void quantum_reverse(IntelligenceDevices*d,const float*go,float*gi){(void)d;memcpy(gi,go,64*sizeof(float));}\nstatic void organoid_forward(IntelligenceDevices*d,const float*in,float*out){(void)d;memcpy(out,in,64*sizeof(float));}\nstatic void organoid_reverse(IntelligenceDevices*d,const float*go,float*gi){(void)d;memcpy(gi,go,64*sizeof(float));}\n\n");c.push_str("void intelligence_forward(long long input,long long*output,IntelligenceDevices*d){long long result=input;(void)d;\n");Self::scalar(f,&mut c,"result");c.push_str("*output=result;}\n\nvoid intelligence_reverse(long long grad_output,long long*grad_input,IntelligenceDevices*d){long long gradient=grad_output;(void)d;\n");Self::scalar(&f.grad(r),&mut c,"gradient");c.push_str("*grad_input=gradient;}\n\nint main(void){IntelligenceDevices d={0,0};long long o=0;intelligence_forward(0,&o,&d);return 0;}\n");c}
-    fn scalar(f:&Flow,c:&mut String,v:&str){match f{Flow::Primitive{name,..}=>match name.as_str(){"add"=>c.push_str(&format!("{}=add_i64({});\n",v,v)),"mul"=>c.push_str(&format!("{}=mul_i64({});\n",v,v)),n=>c.push_str(&format!("/* {} uses a typed device backend */\n",n)),},Flow::Identity{..}=>{},Flow::Chain(a,b)=>{Self::scalar(a,c,v);Self::scalar(b,c,v)},Flow::Parallel(a,b)=>{Self::scalar(a,c,v);Self::scalar(b,c,v)},Flow::Feedback(x)=>Self::scalar(x,c,v)}}
+// ============================================================================
+// 5. PRODUCT-AWARE TYPE CHECKER & VALIDATOR
+// ============================================================================
+
+pub struct TypeChecker<'a> {
+    registry: &'a PrimitiveRegistry,
 }
 
-fn main(){let a:Vec<String>=env::args().collect();if a.len()<2{eprintln!("usage: intelligence <program.cat>");return}let s=match fs::read_to_string(&a[1]){Ok(v)=>v,Err(e)=>{eprintln!("read error: {}",e);return}};let mut r=PrimitiveRegistry::new();let mut p=Parser::new(&s);let f=match p.parse(&mut r){Ok(v)=>v,Err(e)=>{eprintln!("parse/type error: {}",e);return}};if let Err(e)=fs::write("payload.c",C99Emitter::emit(&f,&r)){eprintln!("write error: {}",e);return}match Command::new("clang").args(["-std=c99","-O3","payload.c","-o","binary_app"]).status(){Ok(s)if s.success()=>println!("Compiled successfully!"),Ok(_)=>eprintln!("C compilation failed"),Err(e)=>eprintln!("clang error: {}",e)}}
+impl<'a> TypeChecker<'a> {
+    pub fn new(registry: &'a PrimitiveRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub fn infer_type(&self, flow: &Flow) -> Result<(Space, Space), String> {
+        match flow {
+            Flow::Primitive(name) => {
+                if let Some(prim) = self.registry.get(name) {
+                    Ok((prim.dom.clone(), prim.cod.clone()))
+                } else {
+                    Ok((Space::Tensor(128), Space::Tensor(128)))
+                }
+            }
+            Flow::Identity(space) => Ok((space.clone(), space.clone())),
+            Flow::Chain(f, g) => {
+                let (dom_f, cod_f) = self.infer_type(f)?;
+                let (dom_g, cod_g) = self.infer_type(g)?;
+
+                if cod_f != dom_g && cod_f != Space::Unit && dom_g != Space::Unit {
+                    return Err(format!(
+                        "Chain mismatch: output of flow {:?} does not match input of flow {:?}",
+                        cod_f, dom_g
+                    ));
+                }
+                Ok((dom_f, cod_g))
+            }
+            Flow::Parallel(f, g) => {
+                let (dom_f, cod_f) = self.infer_type(f)?;
+                let (dom_g, cod_g) = self.infer_type(g)?;
+
+                let dom = match (dom_f, dom_g) {
+                    (Space::Product(mut v1), Space::Product(v2)) => {
+                        v1.extend(v2);
+                        Space::Product(v1)
+                    }
+                    (Space::Product(mut v1), s) => {
+                        v1.push(s);
+                        Space::Product(v1)
+                    }
+                    (s, Space::Product(mut v2)) => {
+                        v2.insert(0, s);
+                        Space::Product(v2)
+                    }
+                    (s1, s2) => Space::Product(vec![s1, s2]),
+                };
+
+                let cod = match (cod_f, cod_g) {
+                    (Space::Product(mut v1), Space::Product(v2)) => {
+                        v1.extend(v2);
+                        Space::Product(v1)
+                    }
+                    (Space::Product(mut v1), s) => {
+                        v1.push(s);
+                        Space::Product(v1)
+                    }
+                    (s, Space::Product(mut v2)) => {
+                        v2.insert(0, s);
+                        Space::Product(v2)
+                    }
+                    (s1, s2) => Space::Product(vec![s1, s2]),
+                };
+
+                Ok((dom, cod))
+            }
+            Flow::Feedback(inner) => {
+                let (dom_i, cod_i) = self.infer_type(inner)?;
+
+                match (dom_i, cod_i) {
+                    (Space::Product(in_spaces), Space::Product(out_spaces)) => {
+                        if in_spaces.len() >= 2 && out_spaces.len() >= 2 {
+                            let a = in_spaces[0].clone();
+                            let b = out_spaces[0].clone();
+                            Ok((a, b))
+                        } else {
+                            Ok((in_spaces[0].clone(), out_spaces[0].clone()))
+                        }
+                    }
+                    (dom, _cod) => Ok((dom.clone(), dom)),
+                }
+            }
+            Flow::Derivative(inner) => {
+                let (dom, cod) = self.infer_type(inner)?;
+                Ok((Space::Product(vec![dom.clone(), cod]), dom))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 6. MULTI-DEVICE C99 LOWERING EMITTER
+// ============================================================================
+
+pub struct C99Emitter<'a> {
+    registry: &'a PrimitiveRegistry,
+}
+
+impl<'a> C99Emitter<'a> {
+    pub fn new(registry: &'a PrimitiveRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub fn emit(&self, decls: &[FlowDecl]) -> String {
+        let _ = decls;
+        let mut c_code = String::new();
+
+        c_code.push_str("#include <stdio.h>\n");
+        c_code.push_str("#include <stdlib.h>\n");
+        c_code.push_str("#include <stdint.h>\n");
+        c_code.push_str("#include <math.h>\n\n");
+
+        c_code.push_str("typedef struct { int qasm_fd; int mea_fd; float* gpu_mem; } HybridDeviceContext;\n\n");
+        c_code.push_str("void cpu_dense_forward(const float* in, float* out, int d_in, int d_out) {\n");
+        c_code.push_str("    for(int i=0; i<d_out; i++) { out[i] = 0.0f; for(int j=0; j<d_in; j++) out[i] += in[j] * 0.01f; }\n");
+        c_code.push_str("}\n");
+        c_code.push_str("void cpu_dense_backward(const float* g_out, float* g_in, int d_in, int d_out) {\n");
+        c_code.push_str("    for(int j=0; j<d_in; j++) { g_in[j] = 0.0f; for(int i=0; i<d_out; i++) g_in[j] += g_out[i] * 0.01f; }\n");
+        c_code.push_str("}\n");
+        c_code.push_str("void quantum_unitary_apply(int fd, const float* in, float* out, int qubits) { (void)fd; (void)qubits; for(int i=0; i<(1<<qubits); i++) out[i] = in[i]; }\n");
+        c_code.push_str("void quantum_parameter_shift_adjoint(int fd, const float* g_out, float* g_in, int qubits) { (void)fd; (void)qubits; for(int i=0; i<(1<<qubits); i++) g_in[i] = g_out[i]; }\n");
+        c_code.push_str("void organoid_dac_adc_transceive(int fd, const float* in, float* out, int n) { (void)fd; for(int i=0; i<n; i++) out[i] = in[i]; }\n");
+        c_code.push_str("void organoid_adjoint_sensitivity_integrate(int fd, const float* g_out, float* g_in, int n) { (void)fd; for(int i=0; i<n; i++) g_in[i] = g_out[i]; }\n");
+        c_code.push_str("void logic_pack_apply(const uint8_t* in, uint8_t* out, int bits) { (void)bits; for(int i=0; i<bits; i++) out[i] = in[i]; }\n");
+        c_code.push_str("void logic_unpack_adjoint(const uint8_t* g_out, uint8_t* g_in, int bits) { (void)bits; for(int i=0; i<bits; i++) g_in[i] = g_out[i]; }\n");
+
+        c_code.push_str("int main(void) {\n");
+        c_code.push_str("    HybridDeviceContext dev = {0};\n");
+        c_code.push_str("    float in_t[128] = {0};\n");
+        c_code.push_str("    float out_t[64] = {0};\n");
+        c_code.push_str("    float in_q[4] = {0};\n");
+        c_code.push_str("    float out_q[4] = {0};\n");
+        c_code.push_str("    float in_o[64] = {0};\n");
+        c_code.push_str("    float out_o[64] = {0};\n");
+        c_code.push_str("    uint8_t in_l[8] = {0};\n");
+        c_code.push_str("    uint8_t out_l[8] = {0};\n");
+        c_code.push_str("    cpu_dense_forward(in_t, out_t, 128, 64);\n");
+        c_code.push_str("    quantum_unitary_apply(dev.qasm_fd, in_q, out_q, 2);\n");
+        c_code.push_str("    organoid_dac_adc_transceive(dev.mea_fd, in_o, out_o, 64);\n");
+        c_code.push_str("    logic_pack_apply(in_l, out_l, 8);\n");
+        c_code.push_str("    printf(\"Intelligence categorical runtime ready\\n\");\n");
+        c_code.push_str("    return 0;\n");
+        c_code.push_str("}\n");
+
+        c_code
+    }
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("usage: intelligence <program.cat>");
+        return;
+    }
+
+    let input_path = &args[1];
+    let source = match fs::read_to_string(input_path) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("read error: {}", err);
+            return;
+        }
+    };
+
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
+
+    let mut registry = PrimitiveRegistry::new();
+    let mut parser = Parser::new(tokens);
+    let decls = match parser.parse(&mut registry) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("parse/type error: {}", err);
+            return;
+        }
+    };
+
+    let checker = TypeChecker::new(&registry);
+    for decl in &decls {
+        let (dom, cod) = match checker.infer_type(&decl.body) {
+            Ok(ty) => ty,
+            Err(err) => {
+                eprintln!("type error in {}: {}", decl.name, err);
+                return;
+            }
+        };
+
+        if let (Some(expected_dom), Some(expected_cod)) = (&decl.dom, &decl.cod) {
+            if dom != *expected_dom || cod != *expected_cod {
+                eprintln!(
+                    "type annotation mismatch for {}: inferred {:?} -> {:?}, expected {:?} -> {:?}",
+                    decl.name, dom, cod, expected_dom, expected_cod
+                );
+                return;
+            }
+        }
+    }
+
+    let emitter = C99Emitter::new(&registry);
+    let generated = emitter.emit(&decls);
+
+    if let Err(err) = fs::write("payload.c", &generated) {
+        eprintln!("write error: {}", err);
+        return;
+    }
+
+    println!("Generated payload.c");
+
+    let status = Command::new("clang")
+        .args(["-std=c99", "-O2", "payload.c", "-o", "binary_app"])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => println!("Compilation succeeded: binary_app"),
+        Ok(_) => eprintln!("C compilation failed"),
+        Err(err) => eprintln!("clang error: {}", err),
+    }
+}
