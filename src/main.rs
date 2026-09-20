@@ -7,7 +7,7 @@ use std::process::Command;
 pub enum Space {
     Unit,
     Scalar(String),
-    Tensor { element: String, shape: Vec<String> },
+    Tensor { element: String, shape: Vec<usize> },
     Quantum { qubits: usize },
     Organoid { pins: usize },
     Logic { bits: usize },
@@ -65,7 +65,7 @@ impl Flow {
     pub fn grad(&self, registry: &PrimitiveRegistry) -> Flow {
         match self {
             Flow::Identity { space } => Flow::Identity { space: space.clone() },
-            Flow::Primitive { name, domain, codomain, c_impl } => {
+            Flow::Primitive { name, domain, codomain, .. } => {
                 let primitive = registry
                     .get(name)
                     .cloned()
@@ -82,7 +82,7 @@ impl Flow {
                     name: format!("grad_{}", name),
                     domain: codomain.clone(),
                     codomain: domain.clone(),
-                    c_impl: primitive.reverse_default_impl(Backend::C99Cpu).replace("/* ", "").replace(" */", "").trim().to_string(),
+                    c_impl: primitive.reverse_default_impl(Backend::C99Cpu),
                 }
             }
             Flow::Chain(first, second) => {
@@ -95,9 +95,7 @@ impl Flow {
                 let grad_second = second.grad(registry);
                 Flow::Parallel(Box::new(grad_first), Box::new(grad_second))
             }
-            Flow::Feedback(inner) => {
-                Flow::Feedback(Box::new(inner.grad(registry)))
-            }
+            Flow::Feedback(inner) => Flow::Feedback(Box::new(inner.grad(registry))),
         }
     }
 }
@@ -212,11 +210,11 @@ impl PrimitiveRegistry {
             name: "neural_layer".to_string(),
             domain: Space::Tensor {
                 element: "Float32".to_string(),
-                shape: vec!["128".to_string()],
+                shape: vec![128],
             },
             codomain: Space::Tensor {
                 element: "Float32".to_string(),
-                shape: vec!["64".to_string()],
+                shape: vec![64],
             },
             derivative: DerivativeRule::ReverseMode,
             effects: vec![Effect::TensorDevice],
@@ -509,28 +507,27 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-                match self.peek() {
-                    Some(Token::Lt) => {
-                        self.advance();
-                        let shape_arg = match self.advance() {
-                            Some(Token::Number(value)) => value,
-                            Some(Token::Ident(ident)) => ident.parse::<usize>().unwrap_or(0),
-                            _ => return Err("Expected dimension in generic space".to_string()),
-                        };
-                        self.expect(Token::Gt)?;
+                if matches!(self.peek(), Some(Token::Lt)) {
+                    self.advance();
+                    let shape_arg = match self.advance() {
+                        Some(Token::Number(value)) => value,
+                        Some(Token::Ident(ident)) => ident.parse::<usize>().unwrap_or(0),
+                        _ => return Err("Expected dimension in generic space".to_string()),
+                    };
+                    self.expect(Token::Gt)?;
 
-                        match name.as_str() {
-                            "Tensor" | "Array" => Ok(Space::Tensor {
-                                element: "Float32".to_string(),
-                                shape: vec![shape_arg.to_string()],
-                            }),
-                            "Qubit" | "Quantum" => Ok(Space::Quantum { qubits: shape_arg }),
-                            "Organoid" | "MEA" => Ok(Space::Organoid { pins: shape_arg }),
-                            "Logic" => Ok(Space::Logic { bits: shape_arg }),
-                            _ => Ok(Space::Scalar(name)),
-                        }
+                    match name.as_str() {
+                        "Tensor" | "Array" => Ok(Space::Tensor {
+                            element: "Float32".to_string(),
+                            shape: vec![shape_arg],
+                        }),
+                        "Qubit" | "Quantum" => Ok(Space::Quantum { qubits: shape_arg }),
+                        "Organoid" | "MEA" => Ok(Space::Organoid { pins: shape_arg }),
+                        "Logic" => Ok(Space::Logic { bits: shape_arg }),
+                        _ => Ok(Space::Scalar(name)),
                     }
-                    _ => Ok(Space::Scalar(name)),
+                } else {
+                    Ok(Space::Scalar(name))
                 }
             }
             Some(Token::Number(_)) => {
@@ -565,31 +562,28 @@ impl Parser {
         let flow = self.parse_chain(registry)?;
 
         if let (Some(domain), Some(codomain)) = (declared_domain, declared_codomain) {
-            let inferred = self.infer_codomain(&flow, registry)?;
-            if inferred != codomain {
-                return Err(format!(
-                    "Declared codomain {:?} does not match inferred codomain {:?}",
-                    codomain, inferred
-                ));
-            }
             let inferred_domain = self.infer_domain(&flow, registry)?;
             if inferred_domain != domain {
                 return Err(format!(
                     "Declared domain {:?} does not match inferred domain {:?}",
                     domain, inferred_domain
-                 ));
+                ));
+            }
+            let inferred_codomain = self.infer_codomain(&flow, registry)?;
+            if inferred_codomain != codomain {
+                return Err(format!(
+                    "Declared codomain {:?} does not match inferred codomain {:?}",
+                    codomain, inferred_codomain
+                ));
             }
         }
 
         self.validate_flow(&flow, registry)?;
 
-        let domain = self.infer_domain(&flow, registry)?;
-        let codomain = self.infer_codomain(&flow, registry)?;
-
         Ok(Flow::Primitive {
             name,
-            domain,
-            codomain,
+            domain: self.infer_domain(&flow, registry)?,
+            codomain: self.infer_codomain(&flow, registry)?,
             c_impl: "/* generated flow */".to_string(),
         })
     }
@@ -618,17 +612,14 @@ impl Parser {
                         first_codomain, second_domain
                     ));
                 }
-                self.infer_codomain(second, registry)
+                self.validate_flow(second, registry)
             }
             Flow::Parallel(first, second) => {
                 let first_type = self.validate_flow(first, registry)?;
                 let second_type = self.validate_flow(second, registry)?;
                 Ok(Space::Product(Box::new(first_type), Box::new(second_type)))
             }
-            Flow::Feedback(inner) => {
-                let inner_type = self.validate_flow(inner, registry)?;
-                Ok(inner_type)
-            }
+            Flow::Feedback(inner) => self.validate_flow(inner, registry),
         }
     }
 
@@ -639,7 +630,7 @@ impl Parser {
             Flow::Chain(first, _) => self.infer_domain(first, registry),
             Flow::Parallel(first, second) => Ok(Space::Product(
                 Box::new(self.infer_domain(first, registry)?),
-                Box::new(self.infer_domain(second, registry)?),
+                Box::new(self.infer_domain(second, registry)?)
             )),
             Flow::Feedback(inner) => self.infer_domain(inner, registry),
         }
@@ -652,7 +643,7 @@ impl Parser {
             Flow::Chain(_, second) => self.infer_codomain(second, registry),
             Flow::Parallel(first, second) => Ok(Space::Product(
                 Box::new(self.infer_codomain(first, registry)?),
-                Box::new(self.infer_codomain(second, registry)?),
+                Box::new(self.infer_codomain(second, registry)?)
             )),
             Flow::Feedback(inner) => self.infer_codomain(inner, registry),
         }
@@ -697,7 +688,6 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-
                 let primitive = registry
                     .get(&name)
                     .ok_or_else(|| format!("Undefined primitive: {}", name))?;
@@ -716,13 +706,13 @@ impl Parser {
 
 pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> PortGraph {
     let mut graph = PortGraph::new();
-    let mut index = 0usize;
+    let mut idx = 0usize;
 
-    fn walk(flow: &Flow, registry: &PrimitiveRegistry, graph: &mut PortGraph, index: &mut usize) {
+    fn walk(flow: &Flow, registry: &PrimitiveRegistry, graph: &mut PortGraph, idx: &mut usize) {
         match flow {
             Flow::Identity { space } => {
-                let id = format!("id_{}", index);
-                *index += 1;
+                let id = format!("id_{}", idx);
+                *idx += 1;
                 graph.add_node(PortNode {
                     id: id.clone(),
                     label: "identity".to_string(),
@@ -733,8 +723,8 @@ pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> Po
                 });
             }
             Flow::Primitive { name, domain, codomain, c_impl } => {
-                let id = format!("prim_{}", index);
-                *index += 1;
+                let id = format!("prim_{}", idx);
+                *idx += 1;
                 let primitive = registry.get(name).cloned().unwrap_or(Primitive {
                     name: name.clone(),
                     domain: domain.clone(),
@@ -753,20 +743,18 @@ pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> Po
                 });
             }
             Flow::Chain(first, second) => {
-                walk(first, registry, graph, index);
-                walk(second, registry, graph, index);
+                walk(first, registry, graph, idx);
+                walk(second, registry, graph, idx);
             }
             Flow::Parallel(first, second) => {
-                walk(first, registry, graph, index);
-                walk(second, registry, graph, index);
+                walk(first, registry, graph, idx);
+                walk(second, registry, graph, idx);
             }
-            Flow::Feedback(inner) => {
-                walk(inner, registry, graph, index);
-            }
+            Flow::Feedback(inner) => walk(inner, registry, graph, idx),
         }
     }
 
-    walk(flow, registry, &mut graph, &mut index);
+    walk(flow, registry, &mut graph, &mut idx);
     graph
 }
 
@@ -794,9 +782,6 @@ pub struct C99Emitter;
 
 impl C99Emitter {
     pub fn emit(flow: &Flow, registry: &PrimitiveRegistry) -> String {
-        let graph = lower_flow_to_port_graph(flow, registry);
-        let _ = &graph;
-
         let mut code = String::new();
         code.push_str("#include <stdio.h>\n\n");
         code.push_str("int main(void) {\n");
@@ -820,11 +805,11 @@ impl C99Emitter {
                 Self::codegen(second, code, registry, var);
             }
             Flow::Parallel(first, second) => {
-                code.push_str(&format!("    long long first_res = {};\n", var));
-                code.push_str(&format!("    long long second_res = {};\n", var));
-                Self::codegen(first, code, registry, "first_res");
-                Self::codegen(second, code, registry, "second_res");
-                code.push_str(&format!("    {} = first_res + second_res;\n", var));
+                code.push_str(&format!("    long long left_res = {};\n", var));
+                code.push_str(&format!("    long long right_res = {};\n", var));
+                Self::codegen(first, code, registry, "left_res");
+                Self::codegen(second, code, registry, "right_res");
+                code.push_str(&format!("    {} = left_res + right_res;\n", var));
             }
             Flow::Feedback(inner) => {
                 Self::codegen(inner, code, registry, var);
@@ -839,7 +824,7 @@ fn main() {
         return;
     }
 
-    let code = match fs::read_to_string(&args[1]) {
+    let source = match fs::read_to_string(&args[1]) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("Failed to read file: {}", error);
@@ -848,7 +833,7 @@ fn main() {
     };
 
     let mut registry = PrimitiveRegistry::new();
-    let mut parser = Parser::new(&code);
+    let mut parser = Parser::new(&source);
     let ast = match parser.parse(&mut registry) {
         Ok(ast) => ast,
         Err(error) => {
@@ -864,8 +849,9 @@ fn main() {
 
     let reverse_ast = ast.grad(&registry);
     let graph = lower_flow_to_port_graph(&ast, &registry);
-    let reversed_graph = reverse_port_graph(&graph);
-    let _ = (reverse_ast, reversed_graph);
+    let reverse_graph = reverse_port_graph(&graph);
+
+    let _ = (reverse_ast, reverse_graph);
 
     let c_code = C99Emitter::emit(&ast, &registry);
     if let Err(error) = fs::write("payload.c", c_code) {
