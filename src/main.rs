@@ -61,45 +61,6 @@ pub enum Flow {
     Feedback(Box<Flow>),
 }
 
-impl Flow {
-    pub fn grad(&self, registry: &PrimitiveRegistry) -> Flow {
-        match self {
-            Flow::Identity { space } => Flow::Identity { space: space.clone() },
-            Flow::Primitive { name, domain, codomain, .. } => {
-                let primitive = registry
-                    .get(name)
-                    .cloned()
-                    .unwrap_or(Primitive {
-                        name: format!("grad_{}", name),
-                        domain: domain.clone(),
-                        codomain: codomain.clone(),
-                        derivative: DerivativeRule::Analytic,
-                        effects: vec![Effect::Pure],
-                        implementations: HashMap::new(),
-                    });
-
-                Flow::Primitive {
-                    name: format!("grad_{}", name),
-                    domain: codomain.clone(),
-                    codomain: domain.clone(),
-                    c_impl: primitive.reverse_default_impl(Backend::C99Cpu),
-                }
-            }
-            Flow::Chain(first, second) => {
-                let grad_second = second.grad(registry);
-                let grad_first = first.grad(registry);
-                Flow::Chain(Box::new(grad_second), Box::new(grad_first))
-            }
-            Flow::Parallel(first, second) => {
-                let grad_first = first.grad(registry);
-                let grad_second = second.grad(registry);
-                Flow::Parallel(Box::new(grad_first), Box::new(grad_second))
-            }
-            Flow::Feedback(inner) => Flow::Feedback(Box::new(inner.grad(registry))),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Primitive {
     pub name: String,
@@ -128,6 +89,43 @@ impl Primitive {
             DerivativeRule::StraightThrough => format!("/* STE fallback for {} */", self.name),
             DerivativeRule::Custom(ref name) => format!("/* custom reverse rule: {} */", name),
             DerivativeRule::NonDifferentiable => format!("/* non-differentiable primitive: {} */", self.name),
+        }
+    }
+}
+
+impl Flow {
+    pub fn grad(&self, registry: &PrimitiveRegistry) -> Flow {
+        match self {
+            Flow::Identity { space } => Flow::Identity { space: space.clone() },
+            Flow::Primitive { name, domain, codomain, .. } => {
+                let primitive = registry
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(Primitive {
+                        name: format!("grad_{}", name),
+                        domain: domain.clone(),
+                        codomain: codomain.clone(),
+                        derivative: DerivativeRule::Analytic,
+                        effects: vec![Effect::Pure],
+                        implementations: HashMap::new(),
+                    });
+
+                Flow::Primitive {
+                    name: format!("grad_{}", name),
+                    domain: codomain.clone(),
+                    codomain: domain.clone(),
+                    c_impl: primitive.reverse_default_impl(Backend::C99Cpu),
+                }
+            }
+            Flow::Chain(first, second) => Flow::Chain(
+                Box::new(second.grad(registry)),
+                Box::new(first.grad(registry)),
+            ),
+            Flow::Parallel(first, second) => Flow::Parallel(
+                Box::new(first.grad(registry)),
+                Box::new(second.grad(registry)),
+            ),
+            Flow::Feedback(inner) => Flow::Feedback(Box::new(inner.grad(registry))),
         }
     }
 }
@@ -190,9 +188,7 @@ impl PrimitiveRegistry {
             codomain: Space::Scalar("Int".to_string()),
             derivative: DerivativeRule::Analytic,
             effects: vec![Effect::Pure],
-            implementations: HashMap::from([
-                (Backend::C99Cpu, "result = a + b;".to_string()),
-            ]),
+            implementations: HashMap::from([(Backend::C99Cpu, "result = a + b;".to_string())]),
         });
 
         registry.register(Primitive {
@@ -201,9 +197,7 @@ impl PrimitiveRegistry {
             codomain: Space::Scalar("Int".to_string()),
             derivative: DerivativeRule::Analytic,
             effects: vec![Effect::Pure],
-            implementations: HashMap::from([
-                (Backend::C99Cpu, "result = a * b;".to_string()),
-            ]),
+            implementations: HashMap::from([(Backend::C99Cpu, "result = a * b;".to_string())]),
         });
 
         registry.register(Primitive {
@@ -218,9 +212,7 @@ impl PrimitiveRegistry {
             },
             derivative: DerivativeRule::ReverseMode,
             effects: vec![Effect::TensorDevice],
-            implementations: HashMap::from([
-                (Backend::C99Cpu, "// neural_layer forward\n".to_string()),
-            ]),
+            implementations: HashMap::from([(Backend::C99Cpu, "// neural_layer forward\n".to_string())]),
         });
 
         registry.register(Primitive {
@@ -229,9 +221,7 @@ impl PrimitiveRegistry {
             codomain: Space::Quantum { qubits: 6 },
             derivative: DerivativeRule::ParameterShift { shift: 1.5707964 },
             effects: vec![Effect::QuantumDevice],
-            implementations: HashMap::from([
-                (Backend::OpenQasm, "// quantum_gate\n".to_string()),
-            ]),
+            implementations: HashMap::from([(Backend::OpenQasm, "// quantum_gate\n".to_string())]),
         });
 
         registry.register(Primitive {
@@ -240,9 +230,7 @@ impl PrimitiveRegistry {
             codomain: Space::Organoid { pins: 64 },
             derivative: DerivativeRule::AdjointSensitivity,
             effects: vec![Effect::BiologicalIo],
-            implementations: HashMap::from([
-                (Backend::RealtimeMea, "// organoid_step\n".to_string()),
-            ]),
+            implementations: HashMap::from([(Backend::RealtimeMea, "// organoid_step\n".to_string())]),
         });
 
         registry
@@ -252,8 +240,8 @@ impl PrimitiveRegistry {
         self.primitives.insert(primitive.name.clone(), primitive);
     }
 
-    pub fn get(&self, name: &str) -> Option<&Primitive> {
-        self.primitives.get(name)
+    pub fn get(&self, name: &str) -> Option<Primitive> {
+        self.primitives.get(name).cloned()
     }
 }
 
@@ -543,7 +531,7 @@ impl Parser {
 
     fn parse_flow_decl(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> {
         self.expect(Token::KwFlow)?;
-        let name = match self.advance() {
+        let _name = match self.advance() {
             Some(Token::Ident(name)) => name,
             _ => return Err("Expected flow name".to_string()),
         };
@@ -579,13 +567,7 @@ impl Parser {
         }
 
         self.validate_flow(&flow, registry)?;
-
-        Ok(Flow::Primitive {
-            name,
-            domain: self.infer_domain(&flow, registry)?,
-            codomain: self.infer_codomain(&flow, registry)?,
-            c_impl: "/* generated flow */".to_string(),
-        })
+        Ok(flow)
     }
 
     fn validate_flow(&self, flow: &Flow, registry: &PrimitiveRegistry) -> Result<Space, String> {
@@ -688,8 +670,7 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 self.advance();
-                let primitive = registry
-                    .get(&name)
+                let primitive = registry.get(&name)
                     .ok_or_else(|| format!("Undefined primitive: {}", name))?;
 
                 Ok(Flow::Primitive {
@@ -725,7 +706,7 @@ pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> Po
             Flow::Primitive { name, domain, codomain, c_impl } => {
                 let id = format!("prim_{}", idx);
                 *idx += 1;
-                let primitive = registry.get(name).cloned().unwrap_or(Primitive {
+                let primitive = registry.get(name).unwrap_or(Primitive {
                     name: name.clone(),
                     domain: domain.clone(),
                     codomain: codomain.clone(),
