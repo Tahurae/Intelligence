@@ -1,12 +1,12 @@
 # ILang (Ingenious) — Categorical Programming Language & Universal System Blueprint
 
-> **A Monoidal Category Language () lowering string diagrams to C99 for zero-dependency binary execution.**
+> **A Monoidal Category Language (`.i`) lowering string diagrams to C99 for zero-dependency binary execution.**
 
 ---
 
 ## 1. The Universal Mental Model: How to Build Any Project
 
-Most traditional software engineering treats systems as imperative sequences of instructions or object hierarchies. ** models any real-world problem as a String Diagram in a Strict Monoidal Category.**
+Most traditional software engineering treats systems as imperative sequences of instructions or object hierarchies. **`ilang` models any real-world problem as a String Diagram in a Strict Monoidal Category.**
 
 To construct *any* system—whether a terminal editor, a database, a physics engine, or a neural network—follow this 4-step conceptual framework:
 
@@ -30,8 +30,8 @@ To construct *any* system—whether a terminal editor, a database, a physics eng
 1. **Identify the Wires (Objects):** Define the static data types entering and leaving your system (e.g., Raw Keypresses, Text Buffers, Disk Storage, Memory Pointers).
 2. **Identify the Boxes (Morphisms):** Break down operations into pure functions that transform input wires into output wires.
 3. **Connect Wires via Composition:**
-   - **Sequential Composition ():** Feed the output of Box 1 directly into the input of Box 2.
-   - **Parallel Tensor Composition ():** Run Box 1 and Box 2 side-by-side without mutual interference.
+   - **Sequential Composition (`>>`):** Feed the output of Box 1 directly into the input of Box 2.
+   - **Parallel Tensor Composition (`||`):** Run Box 1 and Box 2 side-by-side without mutual interference.
 4. **Lower to Substrate:** Map high-level categorical flows to ultra-fast, native C99 execution routines.
 
 ---
@@ -42,9 +42,9 @@ To construct *any* system—whether a terminal editor, a database, a physics eng
 
 | Operator | Categorical Concept | Meaning / Execution |
 | :--- | :--- | :--- |
-|  | Sequential Composition | Chains output of left morphism into input of right morphism. |
-|  | Tensor Product | Executes left and right transformations concurrently/side-by-side. |
-|  | Adjoint / Unbind | Dual operation: unbinds matrix bindings or releases tensor state. |
+| `>>` | Sequential Composition | Chains output of left morphism into input of right morphism. |
+| `||` | Tensor Product | Executes left and right transformations concurrently/side-by-side. |
+| `~` | Adjoint / Unbind | Dual operation: unbinds matrix bindings or releases tensor state. |
 
 ### Syntax & Grammar
 
@@ -56,7 +56,7 @@ type DiskLog;
 ```
 
 #### 2. Tensor Product Parsing
-Group multi-wire concurrent states using  and  with :
+Group multi-wire concurrent states using `(` and `)` with `||`:
 ```ilang
 (KeyStream || BufferState)
 ```
@@ -85,10 +85,10 @@ unbind ~MatrixSpace;
 
 ## 3. Architecture: The Frozen Core
 
- enforces a **Frozen Core Principle**:
-- **Compiler Core ():** Immutable Rust-based compiler handling parsing, monoidal category typechecking, string diagram optimization, and C99 code generation.
-- **Substrate Extensions ():** Project-specific low-level C files () providing terminal drivers, hardware access, or OS primitives.
-- **Modules ( & ):** Reusable categorical logic () written directly in .
+`ilang` enforces a **Frozen Core Principle**:
+- **Compiler Core (`src/`):** Immutable Rust-based compiler handling parsing, monoidal category typechecking, string diagram optimization, and C99 code generation.
+- **Substrate Extensions (`extensions/`):** Project-specific low-level C files (`.c`) providing terminal drivers, hardware access, or OS primitives.
+- **Modules (`std/` & `examples/`):** Reusable categorical logic (`.i`) written directly in `ilang`.
 
 ```text
    .i Source Code  ──►  ilang Compiler  ──►  Generated C99  ──►  gcc/clang  ──►  Native Binary
@@ -97,13 +97,13 @@ unbind ~MatrixSpace;
 
 ---
 
-## 4. End-to-End Walkthrough: Building the  Terminal Editor
+## 4. End-to-End Walkthrough: Building the `note` Terminal Editor
 
-### Step 1: Define C Substrates ()
-- : Provides ANSI raw-mode termios terminal handling and key capture.
-- : Provides append-only record logging to .
+### Step 1: Define C Substrates (`extensions/`)
+- `editor_nano.c`: Provides ANSI raw-mode termios terminal handling and key capture.
+- `persistence_disk.c`: Provides append-only record logging to `~/.ilang_repository.txt`.
 
-### Step 2: Write Categorical Flow ()
+### Step 2: Write Categorical Flow (`examples/note_memory.i`)
 ```ilang
 // Connect raw terminal input wire with memory persistence wire
 type TerminalKey;
@@ -137,9 +137,3 @@ git clone https://github.com/Tahurae/ingenious.git
 cd ingenious
 cargo build --release
 ```
-
----
-
-## 📜 License
-
-MIT License
