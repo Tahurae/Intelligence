@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 
-echo "==> Installing Intelligence Programming Language..."
+echo "==> Installing Intelligence Programming Language & Tools..."
 
 if [ -n "$TERMUX_VERSION" ] || [ -d "/data/data/com.termux/files/usr" ]; then
     BIN_DIR="/data/data/com.termux/files/usr/bin"
@@ -25,14 +25,16 @@ if command -v cargo >/dev/null 2>&1; then
     elif [ -f "target/release/ilang" ]; then
         cp target/release/ilang "$BIN_DIR/intelligence"
     fi
-    
     chmod +x "$BIN_DIR/intelligence"
 
+    # Compile built-in note utilities promised in documentation
     if command -v gcc >/dev/null 2>&1; then
-        gcc extensions/editor_nano.c extensions/persistence_disk.c -o "$BIN_DIR/note" 2>/dev/null || true
-        chmod +x "$BIN_DIR/note" 2>/dev/null || true
+        gcc extensions/note_main.c -o "$BIN_DIR/note"
+        gcc extensions/notes_main.c -o "$BIN_DIR/notes"
+        chmod +x "$BIN_DIR/note" "$BIN_DIR/notes"
     fi
 
+    echo "==> Successfully installed 'intelligence', 'note', and 'notes' to $BIN_DIR!"
 else
     echo "Error: Rust/Cargo is required to build Intelligence from source."
     exit 1
