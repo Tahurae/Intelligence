@@ -14,16 +14,23 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    char *filter = (argc >= 2) ? argv[1] : NULL;
+    char *filter = (argc >= 2 && strlen(argv[1]) > 0) ? argv[1] : NULL;
     char line[1024];
     int found = 0;
 
     while (fgets(line, sizeof(line), f)) {
-        if (!filter || strstr(line, filter) != NULL) {
+        if (filter == NULL) {
+            printf("%s", line);
+            found = 1;
+        } else if (strstr(line, filter) != NULL) {
             printf("%s", line);
             found = 1;
         }
     }
     fclose(f);
+
+    if (filter != NULL && !found) {
+        printf("No notes matching '%s' found.\n", filter);
+    }
     return 0;
 }
