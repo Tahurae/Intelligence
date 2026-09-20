@@ -130,132 +130,45 @@ impl Parser {
 pub struct C99Emitter;
 impl C99Emitter {
     pub fn emit(flow: &Flow) -> String {
-        let mut out = String::new();
-        out.push_str("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n#include <termios.h>\n#include <unistd.h>\n#include <time.h>\n\n");
-        out.push_str("#define WIRE_DIM 64\n#define TENSOR_DIM 128\n\n");
+        let mut code = String::new();
+        code.push_str("#include <stdio.h>\n");
+        code.push_str("long long add(long long a, long long b) { return a + b; }\n");
+        code.push_str("long long mul(long long a, long long b) { return a * b; }\n");
+        code.push_str("void print_val(long long x) { printf(\"%lld\\n\", x); }\n\n");
+        
+        code.push_str("int main() {\n");
+        code.push_str("    long long result = 0;\n");
+        Self::codegen(flow, &mut code, "result");
+        code.push_str("    return 0;\n");
+        code.push_str("}\n");
+        code
+    }
 
-        out.push_str("typedef struct {\n");
-        out.push_str("    float tensor[TENSOR_DIM];\n");
-        out.push_str("    float memory_matrix[WIRE_DIM][WIRE_DIM];\n");
-        out.push_str("    float recalled_wire[WIRE_DIM];\n");
-        out.push_str("    char note_text[1024];\n");
-        out.push_str("    char context_tag[256];\n");
-        out.push_str("    char status_msg[256];\n");
-        out.push_str("} SubstrateMemory;\n\n");
-
-        out.push_str("static SubstrateMemory g_mem;\n");
-        out.push_str("static struct termios orig_termios;\n\n");
-
-        out.push_str("void disable_raw() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios); printf(\"\\033[?25h\\033[0m\\n\"); }\n");
-        out.push_str("void enable_raw() { tcgetattr(STDIN_FILENO, &orig_termios); atexit(disable_raw); struct termios raw = orig_termios; raw.c_lflag &= ~(ECHO | ICANON); tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw); }\n\n");
-
-        out.push_str("float cosine_sim(const float* a, const float* b, int len) {\n");
-        out.push_str("    float dot=0, na=0, nb=0;\n");
-        out.push_str("    for(int i=0; i<len; i++) { dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }\n");
-        out.push_str("    return (na==0||nb==0) ? 0.0f : dot/(sqrtf(na)*sqrtf(nb));\n");
-        out.push_str("}\n\n");
-
-        out.push_str("void save_to_disk() {\n");
-        out.push_str("    const char* home = getenv(\"HOME\");\n");
-        out.push_str("    char path[512];\n");
-        out.push_str("    snprintf(path, sizeof(path), \"%s/.ilang_repository.txt\", home ? home : \".\");\n");
-        out.push_str("    FILE* f = fopen(path, \"a\");\n");
-        out.push_str("    if (f) {\n");
-        out.push_str("        time_t now = time(NULL);\n");
-        out.push_str("        char tstr[64]; strftime(tstr, sizeof(tstr), \"%Y-%m-%d %H:%M\", localtime(&now));\n");
-        out.push_str("        fprintf(f, \"[%s] TAG: %s | NOTE: %s\\n\", tstr, g_mem.context_tag, g_mem.note_text);\n");
-        out.push_str("        fclose(f);\n");
-        out.push_str("    }\n");
-        out.push_str("}\n\n");
-
-        out.push_str("void view_repository() {\n");
-        out.push_str("    const char* home = getenv(\"HOME\");\n");
-        out.push_str("    char path[512];\n");
-        out.push_str("    snprintf(path, sizeof(path), \"%s/.ilang_repository.txt\", home ? home : \".\");\n");
-        out.push_str("    printf(\"\\033[H\\033[J\");\n");
-        out.push_str("    printf(\"\\033[7m === ILANG NOTE REPOSITORY === \\033[0m\\n\\n\");\n");
-        out.push_str("    FILE* f = fopen(path, \"r\");\n");
-        out.push_str("    if (!f) { printf(\"  (No notes stored yet in repository)\\n\"); }\n");
-        out.push_str("    else {\n");
-        out.push_str("        char line[1280];\n");
-        out.push_str("        while (fgets(line, sizeof(line), f)) printf(\"  %s\", line);\n");
-        out.push_str("        fclose(f);\n");
-        out.push_str("    }\n");
-        out.push_str("    printf(\"\\n\\033[7m Press any key to return to editor \\033[0m\\n\");\n");
-        out.push_str("    char c; read(STDIN_FILENO, &c, 1);\n");
-        out.push_str("}\n\n");
-
-        out.push_str("void execute_encode_text() {\n");
-        out.push_str("    unsigned int h=5381; for(size_t i=0;i<strlen(g_mem.note_text);i++) h=((h<<5)+h)+g_mem.note_text[i];\n");
-        out.push_str("    for(int i=0;i<WIRE_DIM;i++) g_mem.tensor[i]=sinf((float)(h+i*17)*0.1f);\n");
-        out.push_str("}\n");
-
-        out.push_str("void execute_tag_context() {\n");
-        out.push_str("    unsigned int h=5381; for(size_t i=0;i<strlen(g_mem.context_tag);i++) h=((h<<5)+h)+g_mem.context_tag[i];\n");
-        out.push_str("    for(int i=0;i<WIRE_DIM;i++) g_mem.tensor[WIRE_DIM+i]=cosf((float)(h+i*31)*0.1f);\n");
-        out.push_str("}\n");
-
-        out.push_str("void execute_associate_memory() {\n");
-        out.push_str("    for(int i=0;i<WIRE_DIM;i++) for(int j=0;j<WIRE_DIM;j++) g_mem.memory_matrix[i][j]+=g_mem.tensor[i]*g_mem.tensor[WIRE_DIM+j];\n");
-        out.push_str("}\n");
-
-        out.push_str("void execute_adjoint_associate_memory() {\n");
-        out.push_str("    for(int i=0;i<WIRE_DIM;i++) {\n");
-        out.push_str("        float sum=0; for(int j=0;j<WIRE_DIM;j++) sum+=g_mem.memory_matrix[i][j]*g_mem.tensor[WIRE_DIM+j];\n");
-        out.push_str("        g_mem.recalled_wire[i]=sum;\n");
-        out.push_str("    }\n");
-        out.push_str("}\n\n");
-
-        out.push_str("void run_pipeline() {\n");
-        out.push_str("    execute_encode_text(); execute_tag_context(); execute_associate_memory(); execute_adjoint_associate_memory();\n");
-        out.push_str("}\n\n");
-
-        out.push_str("void draw_editor(int focus_tag) {\n");
-        out.push_str("    printf(\"\\033[H\\033[J\");\n");
-        out.push_str("    printf(\"\\033[7m  ILANG NANO-NOTE TENSOR EDITOR v1.1                      \\033[0m\\n\\n\");\n");
-        out.push_str("    printf(\"  \\033[1;36m[ Note Content ]\\033[0m%s\\n\", focus_tag ? \"\" : \" <editing>\");\n");
-        out.push_str("    printf(\"  %s\\n\\n\", g_mem.note_text[0] ? g_mem.note_text : \"(Type note here...)\");\n");
-        out.push_str("    printf(\"  \\033[1;33m[ Context Tags ]\\033[0m%s\\n\", focus_tag ? \" <editing>\" : \"\");\n");
-        out.push_str("    printf(\"  %s\\n\\n\", g_mem.context_tag[0] ? g_mem.context_tag : \"#general\");\n");
-        out.push_str("    printf(\"  --------------------------------------------------\\n\");\n");
-        out.push_str("    printf(\"  \\033[1;32mStatus:\\033[0m %s\\n\\n\", g_mem.status_msg[0] ? g_mem.status_msg : \"Ready\");\n");
-        out.push_str("    printf(\"\\033[7m ^S Save to Repo   ^R View Repo   ^T Switch Tag   ^X Exit \\033[0m\\n\");\n");
-        out.push_str("}\n\n");
-
-        out.push_str("void run_interactive_nano() {\n");
-        out.push_str("    enable_raw();\n");
-        out.push_str("    strcpy(g_mem.status_msg, \"Press Ctrl+S to save to repository\");\n");
-        out.push_str("    int focus_tag = 0, note_pos = strlen(g_mem.note_text), tag_pos = strlen(g_mem.context_tag);\n");
-        out.push_str("    if (tag_pos == 0) { strcpy(g_mem.context_tag, \"#general\"); tag_pos = 8; }\n");
-        out.push_str("    while (1) {\n");
-        out.push_str("        draw_editor(focus_tag);\n");
-        out.push_str("        char c; if (read(STDIN_FILENO, &c, 1) != 1) continue;\n");
-        out.push_str("        if (c == 24) break; // ^X\n");
-        out.push_str("        else if (c == 18) { view_repository(); } // ^R -> View Repo\n");
-        out.push_str("        else if (c == 19) { // ^S -> Save\n");
-        out.push_str("            run_pipeline(); save_to_disk();\n");
-        out.push_str("            float sim = cosine_sim(&g_mem.tensor[0], g_mem.recalled_wire, WIRE_DIM);\n");
-        out.push_str("            snprintf(g_mem.status_msg, sizeof(g_mem.status_msg), \"SAVED TO DISK! Match: %.2f%%\", sim * 100.0f);\n");
-        out.push_str("        }\n");
-        out.push_str("        else if (c == 20) focus_tag = !focus_tag; // ^T\n");
-        out.push_str("        else if (c == 127 || c == 8) {\n");
-        out.push_str("            if (focus_tag) { if (tag_pos > 0) g_mem.context_tag[--tag_pos] = '\\0'; }\n");
-        out.push_str("            else { if (note_pos > 0) g_mem.note_text[--note_pos] = '\\0'; }\n");
-        out.push_str("        }\n");
-        out.push_str("        else if (c >= 32 && c <= 126) {\n");
-        out.push_str("            if (focus_tag) { if (tag_pos < 254) { g_mem.context_tag[tag_pos++] = c; g_mem.context_tag[tag_pos] = '\\0'; } }\n");
-        out.push_str("            else { if (note_pos < 1022) { g_mem.note_text[note_pos++] = c; g_mem.note_text[note_pos] = '\\0'; } }\n");
-        out.push_str("        }\n");
-        out.push_str("    }\n");
-        out.push_str("}\n\n");
-
-        out.push_str("int main(int argc, char** argv) {\n");
-        out.push_str("    memset(&g_mem, 0, sizeof(SubstrateMemory));\n");
-        out.push_str("    if (argc > 1 && strcmp(argv[1], \"--list\") == 0) { enable_raw(); view_repository(); return 0; }\n");
-        out.push_str("    run_interactive_nano();\n");
-        out.push_str("    return 0;\n");
-        out.push_str("}\n");
-        out
+    fn codegen(flow: &Flow, code: &mut String, var: &str) {
+        match flow {
+            Flow::Identity => {}
+            
+            Flow::Primitive { name, .. } => {
+                code.push_str(&format!("    print_val({});\n", var));
+            }
+            
+            Flow::Chain(f, g) => {
+                Self::codegen(f, code, var);
+                Self::codegen(g, code, var);
+            }
+            
+            Flow::Parallel(f, g) => {
+                code.push_str(&format!("    long long f_res = {};\n", var));
+                code.push_str(&format!("    long long g_res = {};\n", var));
+                Self::codegen(f, code, "f_res");
+                Self::codegen(g, code, "g_res");
+                code.push_str(&format!("    {} = f_res + g_res;\n", var));
+            }
+            
+            Flow::Feedback(f) => {
+                Self::codegen(f, code, var);
+            }
+        }
     }
 }
 
