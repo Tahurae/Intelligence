@@ -17,7 +17,7 @@ Instead of telling the computer step-by-step how to manipulate memory, you draw 
 
 ## 2. Language Keywords & Syntax
 
-### Pathways ()
+### Pathways (`type`)
 A pathway defines a specific kind of data moving through your program.
 
 ```ilang
@@ -26,7 +26,7 @@ type TextBuffer;
 type DiskRecord;
 ```
 
-### Stations ()
+### Stations (`morphism`)
 A station processes incoming data from one pathway and produces data for an outgoing pathway.
 
 ```ilang
@@ -34,7 +34,7 @@ morphism ProcessKey : KeyStream -> TextBuffer;
 morphism SaveToDisk : TextBuffer -> DiskRecord;
 ```
 
-### Pipelines ()
+### Pipelines (`pipeline`)
 A pipeline connects stations into a complete program flow.
 
 ```ilang
@@ -50,7 +50,7 @@ ILang uses four primary operators to control how pathways and stations interact:
 | Operator | Name | What It Does |
 | :--- | :--- | :--- |
 | **`>>`** | Sequential Flow | Connects stations end-to-end. Output from the left station enters the right station. |
-| **`||`** | Parallel Flow | Runs two pathways or stations side-by-side simultaneously without interference. |
+| **`&#124;&#124;`** | Parallel Flow | Runs two pathways or stations side-by-side simultaneously without interference. |
 | **`*`** | Matrix Binding | Merges two pathways into a combined state grid for advanced data storage. |
 | **`~`** | Reset / Unbind | Cleans up linked states and frees system resources when work is complete. |
 
