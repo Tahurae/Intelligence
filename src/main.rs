@@ -12,11 +12,43 @@ pub enum Space {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Flow {
-    Identity,
-    Primitive { name: String, domain: Space, codomain: Space },
+    Primitive { 
+        name: String, 
+        domain: Space, 
+        codomain: Space,
+        c_impl: String,  // ← The actual C code for this morphism
+    },
     Chain(Box<Flow>, Box<Flow>),
     Parallel(Box<Flow>, Box<Flow>),
     Feedback(Box<Flow>),
+}
+
+pub struct PrimitiveRegistry {
+    primitives: HashMap<String, (Space, Space, String)>,
+    // name -> (domain, codomain, c_code)
+}
+
+impl PrimitiveRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self { primitives: HashMap::new() };
+        registry.register("add", 
+            Space::Base("Int".into()), 
+            Space::Base("Int".into()),
+            "result = a + b;".into());
+        registry.register("mul",
+            Space::Base("Int".into()),
+            Space::Base("Int".into()),
+            "result = a * b;".into());
+        registry
+    }
+    
+    pub fn register(&mut self, name: &str, dom: Space, cod: Space, impl_: String) {
+        self.primitives.insert(name.to_string(), (dom, cod, impl_));
+    }
+    
+    pub fn get(&self, name: &str) -> Option<(Space, Space, String)> {
+        self.primitives.get(name).cloned()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,10 +118,26 @@ impl Parser {
         main_flow.ok_or_else(|| "No flow found".to_string())
     }
     fn parse_space_decl(&mut self) -> Result<(), String> { self.expect(Token::KwSpace)?; self.advance(); self.expect(Token::Equals)?; self.parse_space_expr()?; Ok(()) }
-    fn parse_primitive_decl(&mut self) -> Result<(), String> {
-        let name = match self.advance() { Some(Token::Ident(n)) => n, _ => return Err("Err".to_string()) };
-        self.expect(Token::Colon)?; let dom = self.parse_space_expr()?; self.expect(Token::Arrow)?; let cod = self.parse_space_expr()?;
-        self.primitive_types.insert(name, (dom, cod)); Ok(())
+    fn parse_primitive_decl(&mut self, registry: &mut PrimitiveRegistry) -> Result<(), String> {
+    let name = match self.advance() { Some(Token::Ident(n)) => n, _ => return Err("Err".to_string()) };
+    self.expect(Token::Colon)?; 
+    let dom = self.parse_space_expr()?; 
+    self.expect(Token::Arrow)?; 
+    let cod = self.parse_space_expr()?;
+    
+    // Look up the C implementation (from global registry or inline)
+    let c_impl = get_default_impl(&name).unwrap_or_else(|| format!("// {} not implemented", name));
+    registry.register(&name, dom, cod, c_impl);
+    Ok(())
+    }
+
+    fn get_default_impl(name: &str) -> Option<String> {
+        match name {
+            "add" => Some("long long result = a + b;".into()),
+            "mul" => Some("long long result = a * b;".into()),
+            "print" => Some("printf(\"%lld\\n\", x);".into()),
+            _ => None,
+        }
     }
     fn parse_space_expr(&mut self) -> Result<Space, String> {
         let mut left = match self.peek() {
@@ -100,7 +148,47 @@ impl Parser {
         if let Some(Token::OpParallel) = self.peek() { self.advance(); let right = self.parse_space_expr()?; left = Space::Product(Box::new(left), Box::new(right)); }
         Ok(left)
     }
-    fn parse_flow_decl(&mut self) -> Result<Flow, String> { self.advance(); self.advance(); self.expect(Token::Equals)?; self.parse_chain() }
+    fn parse_flow_decl(&mut self, registry: &PrimitiveRegistry) -> Result<Flow, String> { 
+    self.advance(); 
+    self.advance(); 
+    self.expect(Token::Equals)?;
+    let flow = self.parse_chain(registry)?;
+    self.validate_flow(&flow, registry)?;  // ← Type check
+    Ok(flow)
+    }
+
+    fn validate_flow(&self, flow: &Flow, registry: &PrimitiveRegistry) -> Result<Space, String> {
+        match flow {
+            Flow::Identity => Ok(Space::Identity),
+        
+            Flow::Primitive { name, domain, codomain } => {
+                let (expected_dom, expected_cod, _) = registry.get(name)
+                    .ok_or_else(|| format!("Undefined primitive: {}", name))?;
+                if *domain != expected_dom || *codomain != expected_cod {
+                    return Err(format!("Type mismatch for {}", name));
+                }
+                Ok(codomain.clone())
+            }
+        
+            Flow::Chain(f, g) => {
+                let f_cod = self.validate_flow(f, registry)?;
+                let g_dom = self.infer_domain(g, registry)?;
+                if f_cod != g_dom {
+                    return Err(format!("Chain type mismatch: {} != {}", f_cod, g_dom));
+                }
+                self.validate_flow(g, registry)
+            }
+        
+            Flow::Parallel(f, g) => {
+                let f_type = self.validate_flow(f, registry)?;
+                let g_type = self.validate_flow(g, registry)?;
+                Ok(Space::Product(Box::new(f_type), Box::new(g_type)))
+            }
+        
+            Flow::Feedback(f) => self.validate_flow(f, registry),
+        }
+    }
+    
     fn parse_chain(&mut self) -> Result<Flow, String> {
         let mut left = self.parse_parallel()?;
         while let Some(Token::OpChain) = self.peek() { self.advance(); let right = self.parse_parallel()?; left = Flow::Chain(Box::new(left), Box::new(right)); }
@@ -143,46 +231,50 @@ impl C99Emitter {
         code.push_str("}\n");
         code
     }
-
-    fn codegen(flow: &Flow, code: &mut String, var: &str) {
-        match flow {
-            Flow::Identity => {}
-            
-            Flow::Primitive { name, .. } => {
-                code.push_str(&format!("    print_val({});\n", var));
+    
+    fn codegen(flow: &Flow, code: &mut String, registry: &PrimitiveRegistry, var: &str) {
+    match flow {
+        Flow::Identity => {}
+        
+        Flow::Primitive { name, .. } => {
+            if let Some((_, _, impl_)) = registry.get(name) {
+                code.push_str(&format!("    // Execute: {}\n", name));
+                code.push_str(&format!("    {}\n", impl_));
             }
-            
-            Flow::Chain(f, g) => {
-                Self::codegen(f, code, var);
-                Self::codegen(g, code, var);
-            }
-            
-            Flow::Parallel(f, g) => {
+        }
+        
+        Flow::Chain(f, g) => {
+            Self::codegen(f, code, registry, var);
+            Self::codegen(g, code, registry, var);
+        }
+        
+        Flow::Parallel(f, g) => {
                 code.push_str(&format!("    long long f_res = {};\n", var));
                 code.push_str(&format!("    long long g_res = {};\n", var));
                 Self::codegen(f, code, "f_res");
                 Self::codegen(g, code, "g_res");
                 code.push_str(&format!("    {} = f_res + g_res;\n", var));
-            }
+        }
             
-            Flow::Feedback(f) => {
-                Self::codegen(f, code, var);
-            }
+        Flow::Feedback(f) => {
+            Self::codegen(f, code, var);
         }
     }
+    }
 }
-
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() >= 2 {
         if let Ok(code) = fs::read_to_string(&args[1]) {
+            let mut registry = PrimitiveRegistry::new();
             let mut parser = Parser::new(&code);
-            if let Ok(ast) = parser.parse() {
-                let c_code = C99Emitter::emit(&ast);
-                let _ = fs::write("payload.c", &c_code);
-                let _ = Command::new("clang").args(&["-O3", "payload.c", "-lm", "-o", "binary_app"]).status();
-                let _ = Command::new("ln").args(&["-sf", &format!("{}/ingenious/binary_app", env::var("HOME").unwrap()), &format!("{}/bin/note", env::var("PREFIX").unwrap())]).status();
-                println!("Updated 'note' editor installed successfully!");
+            if let Ok(ast) = parser.parse(&mut registry) {  // ← Pass registry
+                if parser.validate_flow(&ast, &registry).is_ok() {  // ← Validate
+                    let c_code = C99Emitter::emit(&ast, &registry);  // ← Pass registry
+                    let _ = fs::write("payload.c", &c_code);
+                    let _ = Command::new("clang").args(&["-O3", "payload.c", "-lm", "-o", "binary_app"]).status();
+                    println!("Compiled successfully!");
+                }
             }
         }
     }
