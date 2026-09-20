@@ -78,6 +78,60 @@ impl Primitive {
             .cloned()
             .unwrap_or_else(|| "/* no implementation */".to_string())
     }
+
+    pub fn reverse_default_impl(&self, backend: Backend) -> String {
+        match self.derivative {
+            DerivativeRule::Analytic => format!("/* reverse of {} */", self.name),
+            DerivativeRule::ReverseMode => format!("/* reverse-mode pass for {} */", self.name),
+            DerivativeRule::ParameterShift { .. } => format!("/* parameter-shift adjoint for {} */", self.name),
+            DerivativeRule::AdjointSensitivity => format!("/* adjoint sensitivity for {} */", self.name),
+            DerivativeRule::StraightThrough => format!("/* STE fallback for {} */", self.name),
+            DerivativeRule::Custom(ref name) => format!("/* custom reverse rule: {} */", name),
+            DerivativeRule::NonDifferentiable => format!("/* non-differentiable primitive: {} */", self.name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortNode {
+    pub id: String,
+    pub label: String,
+    pub forward: String,
+    pub reverse: String,
+    pub input_space: Space,
+    pub output_space: Space,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortGraph {
+    pub nodes: Vec<PortNode>,
+    pub edges: Vec<PortEdge>,
+}
+
+impl PortGraph {
+    pub fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    pub fn add_node(&mut self, node: PortNode) {
+        self.nodes.push(node);
+    }
+
+    pub fn add_edge(&mut self, from: &str, to: &str) {
+        self.edges.push(PortEdge {
+            from: from.to_string(),
+            to: to.to_string(),
+        });
+    }
 }
 
 pub struct PrimitiveRegistry {
@@ -487,20 +541,14 @@ impl Parser {
 
         self.validate_flow(&flow, registry)?;
 
-        let primitive_name = name.clone();
         let domain = self.infer_domain(&flow, registry)?;
         let codomain = self.infer_codomain(&flow, registry)?;
-
-        let implementation = registry
-            .get(&primitive_name)
-            .map(|p| p.default_impl(Backend::C99Cpu))
-            .unwrap_or_else(|| "/* generated flow */".to_string());
 
         Ok(Flow::Primitive {
             name,
             domain,
             codomain,
-            c_impl: implementation,
+            c_impl: "/* generated flow */".to_string(),
         })
     }
 
@@ -624,10 +672,89 @@ impl Parser {
     }
 }
 
+pub fn lower_flow_to_port_graph(flow: &Flow, registry: &PrimitiveRegistry) -> PortGraph {
+    let mut graph = PortGraph::new();
+    let mut node_index = 0usize;
+
+    fn walk(flow: &Flow, registry: &PrimitiveRegistry, graph: &mut PortGraph, index: &mut usize) {
+        match flow {
+            Flow::Identity { space } => {
+                let id = format!("id_{}", index);
+                *index += 1;
+                graph.add_node(PortNode {
+                    id: id.clone(),
+                    label: "identity".to_string(),
+                    forward: "/* identity forward */".to_string(),
+                    reverse: "/* identity reverse */".to_string(),
+                    input_space: space.clone(),
+                    output_space: space.clone(),
+                });
+            }
+            Flow::Primitive { name, domain, codomain, c_impl } => {
+                let id = format!("prim_{}", index);
+                *index += 1;
+                let primitive = registry.get(name).cloned().unwrap_or(Primitive {
+                    name: name.clone(),
+                    domain: domain.clone(),
+                    codomain: codomain.clone(),
+                    derivative: DerivativeRule::Analytic,
+                    effects: vec![Effect::Pure],
+                    implementations: HashMap::new(),
+                });
+                graph.add_node(PortNode {
+                    id: id.clone(),
+                    label: name.clone(),
+                    forward: c_impl.clone(),
+                    reverse: primitive.reverse_default_impl(Backend::C99Cpu),
+                    input_space: domain.clone(),
+                    output_space: codomain.clone(),
+                });
+            }
+            Flow::Chain(first, second) => {
+                walk(first, registry, graph, index);
+                walk(second, registry, graph, index);
+            }
+            Flow::Parallel(first, second) => {
+                walk(first, registry, graph, index);
+                walk(second, registry, graph, index);
+            }
+            Flow::Feedback(inner) => {
+                walk(inner, registry, graph, index);
+            }
+        }
+    }
+
+    walk(flow, registry, &mut graph, &mut node_index);
+    graph
+}
+
+pub fn reverse_port_graph(graph: &PortGraph) -> PortGraph {
+    let mut reversed = PortGraph::new();
+    for node in &graph.nodes {
+        reversed.add_node(PortNode {
+            id: format!("rev_{}", node.id),
+            label: format!("reverse({})", node.label),
+            forward: node.reverse.clone(),
+            reverse: node.forward.clone(),
+            input_space: node.output_space.clone(),
+            output_space: node.input_space.clone(),
+        });
+    }
+
+    for edge in &graph.edges {
+        reversed.add_edge(&format!("rev_{}", edge.to), &format!("rev_{}", edge.from));
+    }
+
+    reversed
+}
+
 pub struct C99Emitter;
 
 impl C99Emitter {
     pub fn emit(flow: &Flow, registry: &PrimitiveRegistry) -> String {
+        let graph = lower_flow_to_port_graph(flow, registry);
+        let _ = &graph;
+
         let mut code = String::new();
         code.push_str("#include <stdio.h>\n\n");
         code.push_str("int main(void) {\n");
@@ -692,6 +819,10 @@ fn main() {
         eprintln!("Type error: {}", error);
         return;
     }
+
+    let graph = lower_flow_to_port_graph(&ast, &registry);
+    let reversed = reverse_port_graph(&graph);
+    let _ = (graph, reversed);
 
     let c_code = C99Emitter::emit(&ast, &registry);
     if let Err(error) = fs::write("payload.c", c_code) {
