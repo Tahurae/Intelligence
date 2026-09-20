@@ -14,22 +14,29 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    char *filter = (argc >= 2 && strlen(argv[1]) > 0) ? argv[1] : NULL;
     char line[1024];
     int found = 0;
 
-    while (fgets(line, sizeof(line), f)) {
-        if (filter == NULL) {
+    // If no argument is provided, print everything
+    if (argc < 2 || strlen(argv[1]) == 0) {
+        while (fgets(line, sizeof(line), f)) {
             printf("%s", line);
-            found = 1;
-        } else if (strstr(line, filter) != NULL) {
+        }
+        fclose(f);
+        return 0;
+    }
+
+    // Otherwise, strictly filter by the provided query/tag
+    char *filter = argv[1];
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, filter) != NULL) {
             printf("%s", line);
             found = 1;
         }
     }
     fclose(f);
 
-    if (filter != NULL && !found) {
+    if (!found) {
         printf("No notes matching '%s' found.\n", filter);
     }
     return 0;
