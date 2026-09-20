@@ -1,6 +1,3 @@
-//! Backend contract. The core language depends on this trait, never on a
-//! particular operating system, runtime, accelerator, or device.
-
 use crate::language::{Space, TypedFlow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
