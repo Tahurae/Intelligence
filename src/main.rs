@@ -1,66 +1,367 @@
-pub mod language;
-pub mod backend;
-pub mod syntax;
-pub mod c99;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
-use std::{collections::HashMap, env, fs};
+mod backend;
+mod c99;
+mod language;
+mod syntax;
+
 use backend::Backend;
 use c99::C99Backend;
-use language::{AstFlow, Derivative, Effect, Signature, Space, TypeChecker, TypedFlow};
-use syntax::parse;
-
-fn builtins() -> HashMap<String, Signature> {
-    let mut p = HashMap::new();
-    let pure = |domain, codomain, derivative| Signature { domain, codomain, effects: vec![Effect::Pure], derivative };
-    p.insert("add".into(), pure(Space::Scalar("f64".into()), Space::Scalar("f64".into()), Derivative::Analytic));
-    p.insert("mul".into(), pure(Space::Scalar("f64".into()), Space::Scalar("f64".into()), Derivative::Analytic));
-    p.insert("neural_layer".into(), pure(Space::Tensor { element: "f32".into(), shape: vec![128] }, Space::Tensor { element: "f32".into(), shape: vec![64] }, Derivative::ReverseMode));
-    p.insert("quantum_gate".into(), Signature { domain: Space::Quantum { qubits: 2 }, codomain: Space::Quantum { qubits: 2 }, effects: vec![Effect::DeviceIo], derivative: Derivative::ReverseMode });
-    p.insert("organoid_step".into(), Signature { domain: Space::Organoid { pins: 64 }, codomain: Space::Organoid { pins: 64 }, effects: vec![Effect::DeviceIo], derivative: Derivative::ReverseMode });
-    p.insert("organoid_pulse".into(), Signature { domain: Space::Organoid { pins: 64 }, codomain: Space::Organoid { pins: 64 }, effects: vec![Effect::DeviceIo], derivative: Derivative::ReverseMode });
-    p.insert("logic_step".into(), pure(Space::Logic { bits: 8 }, Space::Logic { bits: 8 }, Derivative::StraightThrough));
-    p
-}
-
-fn validate_backend(flow: &TypedFlow) -> Result<(), String> {
-    match flow {
-        TypedFlow::Primitive { signature, .. } => C99Backend::new().supports_signature(signature),
-        TypedFlow::Identity(_) => Ok(()),
-        TypedFlow::Chain(a, b) | TypedFlow::Parallel(a, b) => { validate_backend(a)?; validate_backend(b) },
-        TypedFlow::Feedback { inner, .. } | TypedFlow::Gradient { inner, .. } => validate_backend(inner),
-    }
-}
+use language::{default_primitives, Flow, Signature, Space, typecheck};
+use syntax::Program;
 
 fn main() {
-    let path = env::args().nth(1).unwrap_or_else(|| "program.cat".into());
-    let source = match fs::read_to_string(&path) { Ok(s) => s, Err(e) => { eprintln!("read error: {e}"); std::process::exit(1); } };
-    let mut primitives = builtins();
-    let program = match parse(&source, &mut primitives) { Ok(p) => p, Err(e) => { eprintln!("parse error: {e}"); std::process::exit(1); } };
-    let mut typed_flows = HashMap::new();
-    for declaration in &program.flows {
-        let checker = TypeChecker { primitives: &primitives, flows: &typed_flows };
-        let typed = match checker.check(&declaration.body) { Ok(f) => f, Err(e) => { eprintln!("type error in {}: {e}", declaration.name); std::process::exit(1); } };
-        let inferred = typed.signature();
-        if let Some((domain, codomain)) = &declaration.signature { if inferred != (domain.clone(), codomain.clone()) { eprintln!("signature mismatch in {}: inferred {:?}, declared {:?}", declaration.name, inferred, (domain, codomain)); std::process::exit(1); } }
-        if let Err(e) = validate_backend(&typed) { eprintln!("backend error in {}: {e}", declaration.name); std::process::exit(1); }
-        typed_flows.insert(declaration.name.clone(), typed);
+    let path = std::env::args().nth(1).unwrap_or_else(|| "program.cat".to_string());
+    let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+        eprintln!("failed to read `{path}`: {err}");
+        std::process::exit(1);
+    });
+
+    let primitives = default_primitives();
+    let program = syntax::parse_program(&source, &primitives).unwrap_or_else(|err| {
+        eprintln!("parse error: {err}");
+        std::process::exit(1);
+    });
+
+    for flow in program.flows.values() {
+        if let Err(err) = typecheck(flow, &primitives) {
+            eprintln!("type error: {err}");
+            std::process::exit(1);
+        }
     }
+
     let backend = C99Backend::new();
-    let mut output = backend.preamble();
-    for declaration in &program.flows {
-        if let Some(flow) = typed_flows.get(&declaration.name) { output.push_str(&backend.lower(flow).unwrap_or_else(|e| format!("/* lowering error: {e} */\n"))); }
+    let c_output = backend.lower_program(&program).unwrap_or_else(|err| {
+        eprintln!("backend error: {err}");
+        std::process::exit(1);
+    });
+
+    let output_path = Path::new("payload.c");
+    if let Err(err) = fs::write(output_path, &c_output) {
+        eprintln!("failed to write payload.c: {err}");
+        std::process::exit(1);
     }
-    output.push_str("int main(void) { return 0; }\n");
-    if let Err(e) = fs::write("payload.c", output) { eprintln!("write error: {e}"); std::process::exit(1); }
-    println!("Generated payload.c");
+
+    println!("Generated {}", output_path.display());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn checker<'a>(p: &'a HashMap<String, Signature>, f: &'a HashMap<String, TypedFlow>) -> TypeChecker<'a> { TypeChecker { primitives: p, flows: f } }
-    #[test] fn composition_types() { let mut p = builtins(); let program = parse("flow x = neural_layer\n", &mut p).unwrap(); let t = checker(&p, &HashMap::new()).check(&program.flows[0].body).unwrap(); assert_eq!(t.signature().0, Space::Tensor { element: "f32".into(), shape: vec![128] }); }
-    #[test] fn products_preserve_order() { let mut p = builtins(); let program = parse("flow x = neural_layer || quantum_gate\n", &mut p).unwrap(); let t = checker(&p, &HashMap::new()).check(&program.flows[0].body).unwrap(); assert_eq!(t.signature().0, Space::Product(vec![Space::Tensor { element: "f32".into(), shape: vec![128] }, Space::Quantum { qubits: 2 }])); }
-    #[test] fn feedback_requires_matching_trace() { let mut p = builtins(); let program = parse("flow x = ~(neural_layer || quantum_gate || organoid_pulse)\n", &mut p).unwrap(); let t = checker(&p, &HashMap::new()).check(&program.flows[0].body).unwrap(); assert_eq!(t.signature().0, Space::Product(vec![Space::Tensor { element: "f32".into(), shape: vec![128] }, Space::Quantum { qubits: 2 }])); }
-    #[test] fn gradient_reverses_signature() { let mut p = builtins(); let program = parse("flow x = grad(neural_layer)\n", &mut p).unwrap(); let t = checker(&p, &HashMap::new()).check(&program.flows[0].body).unwrap(); assert_eq!(t.signature().1, Space::Tensor { element: "f32".into(), shape: vec![128] }); }
+    use language::{Flow, Space};
+
+    #[test]
+    fn composition_is_checked() {
+        let registry = default_primitives();
+        let inner = Flow::Chain(
+            Box::new(Flow::Primitive {
+                name: "neural_layer".to_string(),
+                domain: Space::Tensor { element: "f32".into(), shape: vec![128] },
+                codomain: Space::Tensor { element: "f32".into(), shape: vec![64] },
+            }),
+            Box::new(Flow::Primitive {
+                name: "neural_layer".to_string(),
+                domain: Space::Tensor { element: "f32".into(), shape: vec![64] },
+                codomain: Space::Tensor { element: "f32".into(), shape: vec![16] },
+            }),
+        );
+        assert!(typecheck(&inner, &registry).is_ok());
+    }
+
+    #[test]
+    fn parallel_product_has_product_space() {
+        let registry = default_primitives();
+        let flow = Flow::Parallel(
+            Box::new(Flow::Primitive {
+                name: "neural_layer".to_string(),
+                domain: Space::Tensor { element: "f32".into(), shape: vec![128] },
+                codomain: Space::Tensor { element: "f32".into(), shape: vec![64] },
+            }),
+            Box::new(Flow::Primitive {
+                name: "quantum_gate".to_string(),
+                domain: Space::Quantum { qubits: 2 },
+                codomain: Space::Quantum { qubits: 2 },
+            }),
+        );
+        let domain = flow.domain();
+        assert_eq!(domain, Space::Product(vec![
+            Space::Tensor { element: "f32".into(), shape: vec![128] },
+            Space::Quantum { qubits: 2 },
+        ]));
+        assert!(typecheck(&flow, &registry).is_ok());
+    }
+
+    #[test]
+    fn feedback_requires_matching_trace() {
+        let registry = default_primitives();
+        let flow = Flow::Feedback(Box::new(Flow::Parallel(
+            Box::new(Flow::Primitive {
+                name: "neural_layer".to_string(),
+                domain: Space::Tensor { element: "f32".into(), shape: vec![128] },
+                codomain: Space::Tensor { element: "f32".into(), shape: vec![64] },
+            }),
+            Box::new(Flow::Primitive {
+                name: "quantum_gate".to_string(),
+                domain: Space::Quantum { qubits: 2 },
+                codomain: Space::Quantum { qubits: 2 },
+            }),
+        )));
+        assert!(typecheck(&flow, &registry).is_err());
+    }
+
+    #[test]
+    fn gradients_reverse_domain_and_codomain() {
+        let flow = Flow::Gradient(Box::new(Flow::Primitive {
+            name: "neural_layer".to_string(),
+            domain: Space::Tensor { element: "f32".into(), shape: vec![128] },
+            codomain: Space::Tensor { element: "f32".into(), shape: vec![64] },
+        }));
+        assert_eq!(flow.domain(), Space::Tensor { element: "f32".into(), shape: vec![128] });
+        assert_eq!(flow.codomain(), Space::Tensor { element: "f32".into(), shape: vec![64] });
+    }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

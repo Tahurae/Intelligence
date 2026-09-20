@@ -1,33 +1,404 @@
-use crate::language::{AstFlow, Derivative, Effect, FlowDecl, Signature, Space};
+use crate::language::{default_primitives, Flow, Program, Space, typecheck};
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
-pub struct ParsedProgram { pub flows: Vec<FlowDecl> }
-
-#[derive(Debug, Clone, PartialEq)]
-enum Token { Ident(String), Number(usize), Space, Flow, Grad, Id, Equals, Colon, Arrow, Chain, Parallel, Tilde, LParen, RParen, LAngle, RAngle, Eof }
-
-fn lex(source: &str) -> Result<Vec<Token>, String> {
-    let chars: Vec<char> = source.chars().collect(); let mut i = 0; let mut out = Vec::new();
-    while i < chars.len() { if chars[i].is_whitespace() { i += 1; continue; } if chars[i] == '/' && chars.get(i+1) == Some(&'/') { i += 2; while i < chars.len() && chars[i] != '\n' { i += 1; } continue; }
-        if i + 1 < chars.len() { let pair: String = chars[i..i+2].iter().collect(); let token = match pair.as_str() { ">>"=>Some(Token::Chain), "||"=>Some(Token::Parallel), "->"=>Some(Token::Arrow), _=>None }; if let Some(t)=token { out.push(t); i+=2; continue; } }
-        match chars[i] { '='=>out.push(Token::Equals), ':'=>out.push(Token::Colon), '~'=>out.push(Token::Tilde), '('=>out.push(Token::LParen), ')'=>out.push(Token::RParen), '<'=>out.push(Token::LAngle), '>'=>out.push(Token::RAngle), c if c.is_ascii_digit()=>{let mut n=0;while i<chars.len()&&chars[i].is_ascii_digit(){n=n*10+(chars[i] as usize-'0' as usize);i+=1;}out.push(Token::Number(n));continue}, c if c.is_ascii_alphabetic()||c=='_'=>{let start=i;while i<chars.len()&&(chars[i].is_ascii_alphanumeric()||chars[i]=='_'){i+=1}let word:String=chars[start..i].iter().collect();out.push(match word.as_str(){"space"=>Token::Space,"flow"=>Token::Flow,"grad"=>Token::Grad,"id"=>Token::Id,_=>Token::Ident(word)});continue}, c=>return Err(format!("unexpected character `{c}`")) } i+=1; }
-    out.push(Token::Eof); Ok(out)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Token {
+    SpaceKw,
+    FlowKw,
+    Ident(String),
+    Number(usize),
+    Equals,
+    Colon,
+    Arrow,
+    Chain,
+    Parallel,
+    Feedback,
+    LParen,
+    RParen,
+    LAngle,
+    RAngle,
+    Comma,
+    Eof,
 }
 
-pub fn parse(source: &str, primitives: &mut HashMap<String, Signature>) -> Result<ParsedProgram, String> {
-    let mut p = Parser { tokens: lex(source)?, pos: 0, spaces: HashMap::new() }; let mut flows = Vec::new();
-    while !matches!(p.peek(), Token::Eof) { match p.peek() { Token::Space=>p.space()?, Token::Ident(_)=>p.primitive(primitives)?, Token::Flow=>flows.push(p.flow()?), t=>return Err(format!("unexpected top-level token {t:?}")) } }
-    Ok(ParsedProgram { flows })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parser {
+    tokens: Vec<Token>,
+    index: usize,
+    spaces: HashMap<String, Space>,
 }
-struct Parser { tokens: Vec<Token>, pos: usize, spaces: HashMap<String, Space> }
+
 impl Parser {
-    fn peek(&self)->&Token{&self.tokens[self.pos]} fn take(&mut self)->Token{let t=self.tokens[self.pos].clone();self.pos+=1;t} fn expect(&mut self,w:Token)->Result<(),String>{let a=self.take();if a==w{Ok(())}else{Err(format!("expected {w:?}, got {a:?}"))}} fn ident(&mut self)->Result<String,String>{match self.take(){Token::Ident(s)=>Ok(s),x=>Err(format!("expected identifier, got {x:?}"))}}
-    fn space(&mut self)->Result<(),String>{self.take();let n=self.ident()?;self.expect(Token::Equals)?;let s=self.space_spec()?;if self.spaces.insert(n.clone(),s).is_some(){return Err(format!("space `{n}` already declared"))}Ok(())}
-    fn primitive(&mut self,primitives:&mut HashMap<String,Signature>)->Result<(),String>{let n=self.ident()?;self.expect(Token::Colon)?;let d=self.space_spec()?;self.expect(Token::Arrow)?;let c=self.space_spec()?;if primitives.contains_key(&n){return Err(format!("primitive `{n}` already declared"))}primitives.insert(n,Signature{domain:d,codomain:c,effects:vec![Effect::Pure],derivative:Derivative::ReverseMode});Ok(())}
-    fn space_spec(&mut self)->Result<Space,String>{match self.take(){Token::Ident(n)=>{if let Some(s)=self.spaces.get(&n){return Ok(s.clone())}let dim=if matches!(self.peek(),Token::LAngle){self.take();let n=match self.take(){Token::Number(n)=>n,x=>return Err(format!("expected dimension, got {x:?}"))};self.expect(Token::RAngle)?;Some(n)}else{None};match(n.as_str(),dim){("Tensor"|"Array",Some(n))=>Ok(Space::Tensor{element:"f32".into(),shape:vec![n]}),("Quantum"|"Qubit",Some(n))=>Ok(Space::Quantum{qubits:n}),("Organoid"|"MEA",Some(n))=>Ok(Space::Organoid{pins:n}),("Logic"|"Bits",Some(n))=>Ok(Space::Logic{bits:n}),(name,None) if ["Tensor","Array","Quantum","Qubit","Organoid","MEA","Logic","Bits"].contains(&name)=>Err(format!("{name} requires <dimension>")),(name,Some(_))=>Err(format!("unknown parameterized space `{name}`")),(name,None)=>Err(format!("undeclared space `{name}`"))}},Token::LParen=>{let mut v=vec![self.space_spec()?];while matches!(self.peek(),Token::Parallel){self.take();v.push(self.space_spec()?)}self.expect(Token::RParen)?;if v.len()<2{Err("product requires at least two spaces".into())}else{Ok(Space::Product(v))}},x=>Err(format!("expected space, got {x:?}"))}}
-    fn flow(&mut self)->Result<FlowDecl,String>{self.take();let name=self.ident()?;let sig=if matches!(self.peek(),Token::Colon){self.take();let d=self.space_spec()?;self.expect(Token::Arrow)?;let c=self.space_spec()?;Some((d,c))}else{None};self.expect(Token::Equals)?;Ok(FlowDecl{name,signature:sig,body:self.expr()?})}
-    fn expr(&mut self)->Result<AstFlow,String>{let mut f=self.parallel()?;while matches!(self.peek(),Token::Chain){self.take();f=AstFlow::Chain(Box::new(f),Box::new(self.parallel()?))}Ok(f)}
-    fn parallel(&mut self)->Result<AstFlow,String>{let mut f=self.primary()?;while matches!(self.peek(),Token::Parallel){self.take();f=AstFlow::Parallel(Box::new(f),Box::new(self.primary()?))}Ok(f)}
-    fn primary(&mut self)->Result<AstFlow,String>{match self.take(){Token::Ident(n)=>Ok(AstFlow::Name(n)),Token::Id=>{if matches!(self.peek(),Token::LParen){self.take();let s=self.space_spec()?;self.expect(Token::RParen)?;Ok(AstFlow::Identity(s))}else{Ok(AstFlow::Identity(Space::Unit))}},Token::Tilde=>Ok(AstFlow::Feedback(Box::new(self.primary()?))),Token::Grad=>{self.expect(Token::LParen)?;let f=self.expr()?;self.expect(Token::RParen)?;Ok(AstFlow::Gradient(Box::new(f)))},Token::LParen=>{let f=self.expr()?;self.expect(Token::RParen)?;Ok(f)},x=>Err(format!("unexpected flow token {x:?}"))}}
+    fn new(source: &str) -> Result<Self, String> {
+        Ok(Self {
+            tokens: tokenize(source)?,
+            index: 0,
+            spaces: HashMap::new(),
+        })
+    }
+
+    fn peek(&self) -> &Token { &self.tokens[self.index] }
+
+    fn advance(&mut self) -> Token {
+        let token = self.tokens[self.index].clone();
+        self.index += 1;
+        token
+    }
+
+    fn expect(&mut self, expected: Token) -> Result<(), String> {
+        let actual = self.advance();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("expected {:?}, found {:?}", expected, actual))
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Token::Ident(name) => Ok(name),
+            token => Err(format!("expected identifier, found {:?}", token)),
+        }
+    }
+
+    fn parse_space_atom(&mut self) -> Result<Space, String> {
+        let name = self.parse_ident()?;
+        let mut dims = Vec::new();
+        if matches!(self.peek(), Token::LAngle) {
+            self.advance();
+            while !matches!(self.peek(), Token::RAngle) {
+                match self.advance() {
+                    Token::Number(value) => dims.push(value),
+                    token => return Err(format!("invalid dimension token {:?}", token)),
+                }
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
+            }
+            self.expect(Token::RAngle)?;
+        }
+
+        match name.as_str() {
+            "Tensor" | "Array" => {
+                let dim = dims.first().copied().unwrap_or(1);
+                Ok(Space::Tensor { element: "f32".into(), shape: vec![dim] })
+            }
+            "Quantum" | "Qubit" => {
+                let dim = dims.first().copied().unwrap_or(1);
+                Ok(Space::Quantum { qubits: dim })
+            }
+            "Organoid" | "MEA" => {
+                let dim = dims.first().copied().unwrap_or(1);
+                Ok(Space::Organoid { pins: dim })
+            }
+            "Logic" | "Bits" => {
+                let dim = dims.first().copied().unwrap_or(1);
+                Ok(Space::Logic { bits: dim })
+            }
+            "Scalar" => Ok(Space::Scalar("f64".into())),
+            "Unit" => Ok(Space::Unit),
+            other if self.spaces.contains_key(other) => Ok(self.spaces[other].clone()),
+            other => Err(format!("unknown type `{other}`")),
+        }
+    }
+
+    fn parse_space(&mut self) -> Result<Space, String> {
+        let first = self.parse_space_atom()?;
+        if matches!(self.peek(), Token::Parallel) {
+            let mut parts = vec![first];
+            while matches!(self.peek(), Token::Parallel) {
+                self.advance();
+                parts.push(self.parse_space_atom()?);
+            }
+            Ok(Space::Product(parts))
+        } else {
+            Ok(first)
+        }
+    }
+
+    fn parse_flow_atom(&mut self) -> Result<Flow, String> {
+        match self.peek() {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(Flow::Primitive { name, domain: Space::Unit, codomain: Space::Unit })
+            }
+            Token::Feedback => {
+                self.advance();
+                Ok(Flow::Feedback(Box::new(self.parse_flow_atom()?)))
+            }
+            Token::LParen => {
+                self.advance();
+                let flow = self.parse_flow()?;
+                self.expect(Token::RParen)?;
+                Ok(flow)
+            }
+            Token::Ident(_) => unreachable!(),
+            token => Err(format!("unexpected token while parsing flow: {:?}", token)),
+        }
+    }
+
+    fn parse_flow(&mut self) -> Result<Flow, String> {
+        let mut left = self.parse_flow_atom()?;
+        while matches!(self.peek(), Token::Chain) {
+            self.advance();
+            let right = self.parse_flow_atom()?;
+            left = Flow::Chain(Box::new(left), Box::new(right));
+        }
+        while matches!(self.peek(), Token::Parallel) {
+            self.advance();
+            let right = self.parse_flow_atom()?;
+            left = Flow::Parallel(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_program(&mut self) -> Result<Program, String> {
+        let mut spaces = HashMap::new();
+        let mut flows = HashMap::new();
+        while !matches!(self.peek(), Token::Eof) {
+            match self.peek() {
+                Token::SpaceKw => {
+                    self.advance();
+                    let name = self.parse_ident()?;
+                    self.expect(Token::Equals)?;
+                    let dimension = self.parse_space()?;
+                    spaces.insert(name, dimension);
+                    self.spaces = spaces.clone();
+                }
+                Token::FlowKw => {
+                    self.advance();
+                    let name = self.parse_ident()?;
+                    let mut flow = if matches!(self.peek(), Token::Colon) {
+                        self.advance();
+                        let domain = self.parse_space()?;
+                        self.expect(Token::Arrow)?;
+                        let codomain = self.parse_space()?;
+                        let body = self.parse_flow()?;
+                        typecheck(&body, &default_primitives())?;
+                        let domain_match = body.domain() == domain;
+                        let codomain_match = body.codomain() == codomain;
+                        if !domain_match || !codomain_match {
+                            return Err(format!("flow `{name}` annotates {:?} -> {:?}, but body is {:?} -> {:?}", domain, codomain, body.domain(), body.codomain()));
+                        }
+                        body
+                    } else {
+                        self.expect(Token::Equals)?;
+                        self.parse_flow()?
+                    };
+                    flows.insert(name, flow);
+                }
+                _ => {
+                    return Err(format!("unexpected top-level token {:?}", self.peek()));
+                }
+            }
+        }
+        Ok(Program { spaces, flows })
+    }
 }
+
+fn tokenize(source: &str) -> Result<Vec<Token>, String> {
+    let mut tokens = Vec::new();
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\n' | '\r' | '\t' => {}
+            '/' => {
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    while chars.peek().is_some() && chars.peek() != Some(&'\n') {
+                        chars.next();
+                    }
+                } else {
+                    return Err("unexpected `/` token".to_string());
+                }
+            }
+            '=' => tokens.push(Token::Equals),
+            ':' => tokens.push(Token::Colon),
+            '~' => tokens.push(Token::Feedback),
+            '(' => tokens.push(Token::LParen),
+            ')' => tokens.push(Token::RParen),
+            '<' => tokens.push(Token::LAngle),
+            '>' => tokens.push(Token::RAngle),
+            ',' => tokens.push(Token::Comma),
+            '|' => {
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    tokens.push(Token::Parallel);
+                } else {
+                    return Err("unexpected `|` token".to_string());
+                }
+            }
+            '>' => {
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                    tokens.push(Token::Chain);
+                } else {
+                    return Err("unexpected `>` token".to_string());
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let mut word = String::new();
+                word.push(c);
+                while let Some(next) = chars.peek() {
+                    if next.is_ascii_alphanumeric() || *next == '_' {
+                        word.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                match word.as_str() {
+                    "space" => tokens.push(Token::SpaceKw),
+                    "flow" => tokens.push(Token::FlowKw),
+                    _ => tokens.push(Token::Ident(word)),
+                }
+            }
+            c if c.is_ascii_digit() => {
+                let mut value = c.to_digit(10).unwrap() as usize;
+                while let Some(next) = chars.peek() {
+                    if next.is_ascii_digit() {
+                        value = value * 10 + chars.next().unwrap().to_digit(10).unwrap() as usize;
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(Token::Number(value));
+            }
+            c => return Err(format!("unexpected character `{c}`")),
+        }
+    }
+    tokens.push(Token::Eof);
+    Ok(tokens)
+}
+
+pub fn parse_program(source: &str, primitives: &HashMap<String, Signature>) -> Result<Program, String> {
+    let mut parser = Parser::new(source)?;
+    let program = parser.parse_program()?;
+    for flow in program.flows.values() {
+        typecheck(flow, primitives)?;
+    }
+    Ok(program)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_simple_flow() {
+        let primitives = default_primitives();
+        let source = "space A = Tensor<128>\nspace B = Tensor<64>\nflow f : A -> B = neural_layer\n";
+        let program = parse_program(source, &primitives).unwrap();
+        assert!(program.flows.contains_key("f"));
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

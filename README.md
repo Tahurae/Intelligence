@@ -1,24 +1,20 @@
 # Intelligence Programming Language
 
-Intelligence is a backend-independent categorical base language. The core
-specifies spaces, typed flows, composition, products, trace, gradients, effects,
-and a typed intermediate representation. Operating systems, runtimes, drivers,
-and accelerators are integrations layered on top.
+Intelligence is a backend-independent categorical base language. The core defines
+spaces, typed flows, composition, product wiring, feedback traces, gradients,
+and effects without depending on any OS, driver, CUDA runtime, or hardware API.
 
-## Build and run
+The current implementation is a normal Rust crate with a portable C99 backend.
+The language can be compiled and checked using standard Cargo tooling. This
+project is intentionally designed so that device- and OS-specific behavior can
+be implemented as separate backends instead of being mixed into the base language.
 
-```bash
-cargo check
-cargo test
-cargo run -- program.cat
-clang -std=c99 -Wall -Wextra -Werror payload.c -o binary_app
-```
-
-The compiler pipeline is:
+## Example program
 
 ```text
-source -> lexer/parser -> structural AST -> typed IR -> backend validation -> C99 lowering
-```
+space A = Tensor<128>
+space B = Tensor<64>
 
-The C99 backend is a portable bootstrap backend. Hardware-specific behavior is
-not part of the language core.
+flow hybrid : (A || A) -> (B || B) = (neural_layer || neural_layer)
+flow traced : (A || A) -> (B || B) = ~(neural_layer || neural_layer)
+```

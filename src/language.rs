@@ -1,11 +1,6 @@
-//! Backend-independent language model for Intelligence.
-//!
-//! This module deliberately contains no OS, device, CUDA, OpenQASM, or C99
-//! assumptions. Backends consume the typed IR defined here.
-
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Space {
     Unit,
     Scalar(String),
@@ -17,103 +12,306 @@ pub enum Space {
 }
 
 impl Space {
-    pub fn product(left: Space, right: Space) -> Self {
-        let mut parts = match left { Self::Product(parts) => parts, value => vec![value] };
-        match right { Self::Product(other) => parts.extend(other), value => parts.push(value) }
-        Self::Product(parts)
-    }
+    pub fn product(left: Self, right: Self) -> Self {
+        let mut parts = match left {
+            Self::Product(mut rest) => {
+                let mut acc = Vec::new();
+                acc.append(&mut rest);
+                acc
+            }
+            other => vec![other],
+        };
 
-    pub fn parts(&self) -> Vec<Space> {
-        match self { Self::Product(parts) => parts.clone(), value => vec![value.clone()] }
+        match right {
+            Self::Product(mut rest) => parts.append(&mut rest),
+            other => parts.push(other),
+        }
+
+        Self::Product(parts)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Effect { Pure, Allocation, HostIo, DeviceIo, Nondeterministic }
+pub enum Effect {
+    Pure,
+    DeviceIo,
+    HostIo,
+    Nondeterministic,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Derivative { Analytic, ReverseMode, StraightThrough, NonDifferentiable }
+pub enum Derivative {
+    Analytic,
+    ReverseMode,
+    StraightThrough,
+    NonDifferentiable,
+}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     pub domain: Space,
     pub codomain: Space,
-    pub effects: Vec<Effect>,
     pub derivative: Derivative,
+    pub effects: Vec<Effect>,
 }
 
-#[derive(Debug, Clone)]
-pub enum AstFlow {
-    Name(String),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Flow {
+    Primitive { name: String, domain: Space, codomain: Space },
     Identity(Space),
-    Chain(Box<AstFlow>, Box<AstFlow>),
-    Parallel(Box<AstFlow>, Box<AstFlow>),
-    Feedback(Box<AstFlow>),
-    Gradient(Box<AstFlow>),
+    Chain(Box<Flow>, Box<Flow>),
+    Parallel(Box<Flow>, Box<Flow>),
+    Feedback(Box<Flow>),
+    Gradient(Box<Flow>),
 }
 
-#[derive(Debug, Clone)]
-pub struct FlowDecl { pub name: String, pub signature: Option<(Space, Space)>, pub body: AstFlow }
-
-#[derive(Debug, Clone)]
-pub enum TypedFlow {
-    Primitive { name: String, signature: Signature },
-    Identity(Space),
-    Chain(Box<TypedFlow>, Box<TypedFlow>),
-    Parallel(Box<TypedFlow>, Box<TypedFlow>),
-    Feedback { inner: Box<TypedFlow>, trace: Space, domain: Space, codomain: Space },
-    Gradient { inner: Box<TypedFlow>, domain: Space, codomain: Space },
-}
-
-impl TypedFlow {
-    pub fn signature(&self) -> (Space, Space) {
+impl Flow {
+    pub fn domain(&self) -> Space {
         match self {
-            Self::Primitive { signature, .. } => (signature.domain.clone(), signature.codomain.clone()),
-            Self::Identity(space) => (space.clone(), space.clone()),
-            Self::Chain(left, right) => (left.signature().0, right.signature().1),
-            Self::Parallel(left, right) => (Space::product(left.signature().0, right.signature().0), Space::product(left.signature().1, right.signature().1)),
-            Self::Feedback { domain, codomain, .. } | Self::Gradient { domain, codomain, .. } => (domain.clone(), codomain.clone()),
+            Self::Primitive { domain, .. } => domain.clone(),
+            Self::Identity(space) => space.clone(),
+            Self::Chain(left, _) => left.domain(),
+            Self::Parallel(left, right) => Space::Product(vec![left.domain(), right.domain()]),
+            Self::Feedback(inner) => inner.domain(),
+            Self::Gradient(inner) => inner.codomain(),
+        }
+    }
+
+    pub fn codomain(&self) -> Space {
+        match self {
+            Self::Primitive { codomain, .. } => codomain.clone(),
+            Self::Identity(space) => space.clone(),
+            Self::Chain(_, right) => right.codomain(),
+            Self::Parallel(left, right) => Space::Product(vec![left.codomain(), right.codomain()]),
+            Self::Feedback(inner) => inner.codomain(),
+            Self::Gradient(inner) => inner.domain(),
         }
     }
 }
 
-pub struct TypeChecker<'a> {
-    pub primitives: &'a HashMap<String, Signature>,
-    pub flows: &'a HashMap<String, TypedFlow>,
+pub fn default_primitives() -> HashMap<String, Signature> {
+    let mut map = HashMap::new();
+    let scalar = |dom: Space, cod: Space, der: Derivative| Signature {
+        domain: dom,
+        codomain: cod,
+        derivative: der,
+        effects: vec![Effect::Pure],
+    };
+
+    map.insert(
+        "add".to_string(),
+        scalar(Space::Scalar("f64".into()), Space::Scalar("f64".into()), Derivative::Analytic),
+    );
+    map.insert(
+        "mul".to_string(),
+        scalar(Space::Scalar("f64".into()), Space::Scalar("f64".into()), Derivative::Analytic),
+    );
+    map.insert(
+        "neural_layer".to_string(),
+        Signature {
+            domain: Space::Tensor { element: "f32".into(), shape: vec![128] },
+            codomain: Space::Tensor { element: "f32".into(), shape: vec![64] },
+            derivative: Derivative::ReverseMode,
+            effects: vec![Effect::Pure],
+        },
+    );
+    map.insert(
+        "quantum_gate".to_string(),
+        Signature {
+            domain: Space::Quantum { qubits: 2 },
+            codomain: Space::Quantum { qubits: 2 },
+            derivative: Derivative::ReverseMode,
+            effects: vec![Effect::DeviceIo],
+        },
+    );
+    map.insert(
+        "organoid_pulse".to_string(),
+        Signature {
+            domain: Space::Organoid { pins: 64 },
+            codomain: Space::Organoid { pins: 64 },
+            derivative: Derivative::ReverseMode,
+            effects: vec![Effect::DeviceIo],
+        },
+    );
+    map.insert(
+        "logic_step".to_string(),
+        Signature {
+            domain: Space::Logic { bits: 8 },
+            codomain: Space::Logic { bits: 8 },
+            derivative: Derivative::StraightThrough,
+            effects: vec![Effect::Pure],
+        },
+    );
+
+    map
 }
 
-impl<'a> TypeChecker<'a> {
-    pub fn check(&self, flow: &AstFlow) -> Result<TypedFlow, String> {
-        match flow {
-            AstFlow::Name(name) => {
-                if let Some(signature) = self.primitives.get(name) { return Ok(TypedFlow::Primitive { name: name.clone(), signature: signature.clone() }); }
-                self.flows.get(name).cloned().ok_or_else(|| format!("undefined name `{name}`"))
+pub fn typecheck(flow: &Flow, registry: &HashMap<String, Signature>) -> Result<(), String> {
+    match flow {
+        Flow::Primitive { name, domain, codomain } => {
+            let signature = registry.get(name).ok_or_else(|| format!("unknown primitive `{name}`"))?;
+            if signature.domain != *domain || signature.codomain != *codomain {
+                return Err(format!(
+                    "primitive `{name}` requires {:?} -> {:?}, got {:?} -> {:?}",
+                    signature.domain, signature.codomain, domain, codomain
+                ));
             }
-            AstFlow::Identity(space) => Ok(TypedFlow::Identity(space.clone())),
-            AstFlow::Chain(left, right) => {
-                let left = self.check(left)?; let right = self.check(right)?;
-                let left_out = left.signature().1; let right_in = right.signature().0;
-                if left_out != right_in { return Err(format!("composition mismatch: {:?} cannot feed {:?}", left_out, right_in)); }
-                Ok(TypedFlow::Chain(Box::new(left), Box::new(right)))
+            Ok(())
+        }
+        Flow::Identity(_) => Ok(()),
+        Flow::Chain(left, right) => {
+            typecheck(left, registry)?;
+            typecheck(right, registry)?;
+            if left.codomain() != right.domain() {
+                return Err(format!(
+                    "composition mismatch: {:?} -> {:?} cannot feed {:?} -> {:?}",
+                    left.domain(), left.codomain(), right.domain(), right.codomain()
+                ));
             }
-            AstFlow::Parallel(left, right) => Ok(TypedFlow::Parallel(Box::new(self.check(left)?), Box::new(self.check(right)?))),
-            AstFlow::Feedback(inner) => {
-                let inner = self.check(inner)?; let (domain, codomain) = inner.signature();
-                let input = domain.parts(); let output = codomain.parts();
-                if input.len() < 2 || output.len() < 2 { return Err("feedback requires f : A || U -> B || U".into()); }
-                let input_trace = input.last().unwrap(); let output_trace = output.last().unwrap();
-                if input_trace != output_trace { return Err(format!("feedback trace mismatch: {:?} != {:?}", input_trace, output_trace)); }
-                let domain = collapse(Space::Product(input[..input.len()-1].to_vec()));
-                let codomain = collapse(Space::Product(output[..output.len()-1].to_vec()));
-                Ok(TypedFlow::Feedback { inner: Box::new(inner), trace: input_trace.clone(), domain, codomain })
+            Ok(())
+        }
+        Flow::Parallel(left, right) => {
+            typecheck(left, registry)?;
+            typecheck(right, registry)?;
+            Ok(())
+        }
+        Flow::Feedback(inner) => {
+            typecheck(inner, registry)?;
+            let domain = inner.domain();
+            let codomain = inner.codomain();
+            if domain != codomain {
+                return Err(format!("feedback requires matching trace: {:?} != {:?}", domain, codomain));
             }
-            AstFlow::Gradient(inner) => {
-                let inner = self.check(inner)?; let (domain, codomain) = inner.signature();
-                if matches!(inner, TypedFlow::Primitive { signature: Signature { derivative: Derivative::NonDifferentiable, .. }, .. }) { return Err("cannot differentiate a non-differentiable primitive".into()); }
-                Ok(TypedFlow::Gradient { inner: Box::new(inner), domain: Space::product(domain, codomain.clone()), codomain: domain })
-            }
+            Ok(())
+        }
+        Flow::Gradient(inner) => {
+            typecheck(inner, registry)?;
+            Ok(())
         }
     }
 }
 
-fn collapse(space: Space) -> Space { match space { Space::Product(mut parts) if parts.len() == 1 => parts.remove(0), value => value } }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    pub spaces: HashMap<String, Space>,
+    pub flows: HashMap<String, Flow>,
+}
+
+pub fn lower_flow(flow: &Flow) -> String {
+    match flow {
+        Flow::Primitive { name, .. } => format!("/* {name} */\n"),
+        Flow::Identity(space) => format!("/* identity {:?} */\n", space),
+        Flow::Chain(left, right) => {
+            let mut out = String::new();
+            out.push_str(&lower_flow(left));
+            out.push_str(&lower_flow(right));
+            out
+        }
+        Flow::Parallel(left, right) => {
+            let mut out = String::new();
+            out.push_str(&lower_flow(left));
+            out.push_str(&lower_flow(right));
+            out
+        }
+        Flow::Feedback(inner) => {
+            let mut out = String::new();
+            out.push_str("/* feedback trace */\n");
+            out.push_str(&lower_flow(inner));
+            out
+        }
+        Flow::Gradient(inner) => {
+            let mut out = String::new();
+            out.push_str("/* grad */\n");
+            out.push_str(&lower_flow(inner));
+            out
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

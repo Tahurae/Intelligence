@@ -1,11 +1,5 @@
-// Strictly type-correct base-language example.
-space Tensor128 = Tensor<128>
-space Tensor64 = Tensor<64>
-space Qubit2 = Qubit<2>
-space Bio64 = Organoid<64>
+space A = Tensor<128>
+space B = Tensor<64>
 
-flow HybridPipeline : (Tensor128 || Qubit2 || Bio64) -> (Tensor64 || Qubit2 || Bio64) =
-    neural_layer || quantum_gate || organoid_pulse
-
-flow TracedPipeline : (Tensor128 || Qubit2) -> (Tensor64 || Qubit2) =
-    ~(neural_layer || quantum_gate || organoid_pulse)
+flow hybrid : (A || A) -> (B || B) = (neural_layer || neural_layer)
+flow traced : (A || A) -> (B || B) = ~(neural_layer || neural_layer)
