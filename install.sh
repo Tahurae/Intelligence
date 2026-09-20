@@ -1,27 +1,39 @@
-#!/bin/sh
+#!/usr/bin/env sh
 set -e
 
-REPO="Tahurae/ingenious"
-INSTALL_DIR="${PREFIX:-/usr/local}/bin"
+echo "==> Installing Intelligence Programming Language..."
 
-echo "Installing ilang..."
+if [ -n "$TERMUX_VERSION" ] || [ -d "/data/data/com.termux/files/usr" ]; then
+    BIN_DIR="/data/data/com.termux/files/usr/bin"
+else
+    BIN_DIR="${PREFIX:-/usr/local}/bin"
+fi
 
-# Detect Architecture
-ARCH=$(uname -m)
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+mkdir -p "$BIN_DIR"
 
-case "$ARCH" in
-    x86_64) ARCH="x86_64" ;;
-    aarch64|arm64) ARCH="aarch64" ;;
-    *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-esac
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Download pre-compiled release binary
-DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/ilang-${OS}-${ARCH}"
+git clone --depth 1 https://github.com/Tahurae/Intelligence.git "$TMP_DIR"
+cd "$TMP_DIR"
 
-mkdir -p "$INSTALL_DIR"
-curl -sSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/ilang"
-chmod +x "$INSTALL_DIR/ilang"
+if command -v cargo >/dev/null 2>&1; then
+    cargo build --release
+    
+    if [ -f "target/release/intelligence" ]; then
+        cp target/release/intelligence "$BIN_DIR/intelligence"
+    elif [ -f "target/release/ilang" ]; then
+        cp target/release/ilang "$BIN_DIR/intelligence"
+    fi
+    
+    chmod +x "$BIN_DIR/intelligence"
 
-echo "ilang installed successfully to $INSTALL_DIR/ilang!"
-echo "Run 'ilang --version' or 'ilang note_memory.i' to get started."
+    if command -v gcc >/dev/null 2>&1; then
+        gcc extensions/editor_nano.c extensions/persistence_disk.c -o "$BIN_DIR/note" 2>/dev/null || true
+        chmod +x "$BIN_DIR/note" 2>/dev/null || true
+    fi
+
+else
+    echo "Error: Rust/Cargo is required to build Intelligence from source."
+    exit 1
+fi
