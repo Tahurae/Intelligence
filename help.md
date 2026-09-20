@@ -18,28 +18,13 @@ Instead of telling the computer step-by-step how to manipulate memory, you draw 
 ## 2. Language Keywords & Syntax
 
 ### Pathways (`type`)
-A pathway defines a specific kind of data moving through your program.
-
-```ilang
-type KeyStream;
-type TextBuffer;
-type DiskRecord;
-```
+Defines a specific kind of data moving through your program.
 
 ### Stations (`morphism`)
-A station processes incoming data from one pathway and produces data for an outgoing pathway.
-
-```ilang
-morphism ProcessKey : KeyStream -> TextBuffer;
-morphism SaveToDisk : TextBuffer -> DiskRecord;
-```
+Processes incoming data from one pathway and produces data for an outgoing pathway.
 
 ### Pipelines (`pipeline`)
-A pipeline connects stations into a complete program flow.
-
-```ilang
-pipeline MainProgram = ProcessKey >> SaveToDisk;
-```
+Connects stations into a complete program flow.
 
 ---
 
@@ -58,12 +43,11 @@ ILang uses four primary operators to control how pathways and stations interact:
 
 ## 4. Project File Structure
 
-The repository is organized into four clean directories:
+The repository is organized into three clean core directories:
 
 * **`src/` (The Compiler):** The immutable core engine written in Rust. It checks your pathways for errors and converts your `.i` blueprints into fast C code.
 * **`std/` (Standard Library):** Reusable ILang files containing basic building blocks and mathematical transformations.
 * **`extensions/` (System Driver Substrates):** Low-level C files that handle hardware operations, terminal keypresses, and file writing.
-* **`examples/` (Sample Programs):** Ready-to-compile `.i` blueprints showing how to build real applications.
 
 ---
 
