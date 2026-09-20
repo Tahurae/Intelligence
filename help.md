@@ -1,6 +1,6 @@
 # ILang (Ingenious) — Complete Reference Manual
 
-This manual provides a full breakdown of the ILang language, its file structure, core rules, and built-in tools.
+This manual provides a full breakdown of the ILang language, its file structure, core rules, built-in tools, and terminal shortcuts.
 
 ---
 
@@ -17,7 +17,7 @@ Instead of telling the computer step-by-step how to manipulate memory, you draw 
 
 ## 2. Language Keywords & Syntax
 
-### Pathways ()
+### Pathways (`type`)
 A pathway defines a specific kind of data moving through your program.
 
 ```ilang
@@ -26,7 +26,7 @@ type TextBuffer;
 type DiskRecord;
 ```
 
-### Stations ()
+### Stations (`morphism`)
 A station processes incoming data from one pathway and produces data for an outgoing pathway.
 
 ```ilang
@@ -34,7 +34,7 @@ morphism ProcessKey : KeyStream -> TextBuffer;
 morphism SaveToDisk : TextBuffer -> DiskRecord;
 ```
 
-### Pipelines ()
+### Pipelines (`pipeline`)
 A pipeline connects stations into a complete program flow.
 
 ```ilang
@@ -67,25 +67,22 @@ The repository is organized into four clean directories:
 
 ---
 
-## 5. Built-in Tool: The `note` Editor
+## 5. Built-in Tool: The `note` Editor & Shortcuts
 
-ILang includes a globally available terminal editor (`note`) built entirely using these concepts.
+ILang includes a globally available terminal note-taking editor (`note`) built entirely using these concepts.
 
 * **Binary Location:** `$PREFIX/bin/note`
 * **Storage File:** `~/.ilang_repository.txt`
 
-### Standard Keyboard Shortcuts
-* **`Ctrl + S`:** Save current note record with a timestamp and active tag.
-* **`Ctrl + R`:** Read and browse saved notes from the repository file.
-* **`Ctrl + T`:** Create or switch active tag.
-* **`Ctrl + X`:** Exit the editor.
+### Termux Commands
+* **`note`**: Launches the global ILang text/note editor from anywhere in the terminal.
+* **`notes`**: Directly views and prints all saved note logs from your repository file.
 
-### Termux Specific Shortcuts (Touchscreen & Mobile)
-When using Termux on Android without a physical keyboard:
-* **`Volume Down + S`** (or tap **`CTRL`** on Termux extra key row + **`S`**): Save note.
-* **`Volume Down + R`** (or tap **`CTRL`** on Termux extra key row + **`R`**): Read/browse saved records.
-* **`Volume Down + T`** (or tap **`CTRL`** on Termux extra key row + **`T`**): Create or switch tag.
-* **`Volume Down + X`** (or tap **`CTRL`** on Termux extra key row + **`X`**): Exit editor.
+### In-Editor Keyboard Shortcuts
+* **`Ctrl + S`**: Save current note with an automatic timestamp and active tag.
+* **`Ctrl + R`**: Open and read previously saved notes inside the editor.
+* **`Ctrl + T`**: Switch or create a new organizational tag/category.
+* **`Ctrl + X`**: Exit the editor and return to terminal prompt.
 
 ---
 
