@@ -17,7 +17,7 @@ Instead of telling the computer step-by-step how to manipulate memory, you draw 
 
 ## 2. Language Keywords & Syntax
 
-### Pathways (`type`)
+### Pathways ()
 A pathway defines a specific kind of data moving through your program.
 
 ```ilang
@@ -26,7 +26,7 @@ type TextBuffer;
 type DiskRecord;
 ```
 
-### Stations (`morphism`)
+### Stations ()
 A station processes incoming data from one pathway and produces data for an outgoing pathway.
 
 ```ilang
@@ -34,7 +34,7 @@ morphism ProcessKey : KeyStream -> TextBuffer;
 morphism SaveToDisk : TextBuffer -> DiskRecord;
 ```
 
-### Pipelines (`pipeline`)
+### Pipelines ()
 A pipeline connects stations into a complete program flow.
 
 ```ilang
@@ -69,20 +69,23 @@ The repository is organized into four clean directories:
 
 ## 5. Built-in Tool: The `note` Editor
 
-ILang includes a globally available terminal editor built entirely using these concepts.
+ILang includes a globally available terminal editor (`note`) built entirely using these concepts.
 
 * **Binary Location:** `$PREFIX/bin/note`
 * **Storage File:** `~/.ilang_repository.txt`
 
-### Terminal Launch Shortcuts
-* **`note`**: Launches the interactive terminal editor directly.
-* **`notes`**: Alias shortcut to open the editor and immediately view stored repository records.
+### Standard Keyboard Shortcuts
+* **`Ctrl + S`:** Save current note record with a timestamp and active tag.
+* **`Ctrl + R`:** Read and browse saved notes from the repository file.
+* **`Ctrl + T`:** Create or switch active tag.
+* **`Ctrl + X`:** Exit the editor.
 
-### Keyboard Controls Inside Editor
-* **`Ctrl + S`**: Save current note with an automatic timestamp and tag.
-* **`Ctrl + R`**: Open and view previously saved notes from the repository.
-* **`Ctrl + T`**: Switch or create a new organizational tag.
-* **`Ctrl + X`**: Exit the editor safely.
+### Termux Specific Shortcuts (Touchscreen & Mobile)
+When using Termux on Android without a physical keyboard:
+* **`Volume Down + S`** (or tap **`CTRL`** on Termux extra key row + **`S`**): Save note.
+* **`Volume Down + R`** (or tap **`CTRL`** on Termux extra key row + **`R`**): Read/browse saved records.
+* **`Volume Down + T`** (or tap **`CTRL`** on Termux extra key row + **`T`**): Create or switch tag.
+* **`Volume Down + X`** (or tap **`CTRL`** on Termux extra key row + **`X`**): Exit editor.
 
 ---
 
